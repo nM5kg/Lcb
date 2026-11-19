@@ -4,7 +4,7 @@ import {
   isHebrewLeapYear, roshHashanahFixed, daysInHebrewYear, daysInHebrewMonth,
   fixedFromHebrew, hebrewFromFixed, hebrewFromGregorian, gregorianFromFixed,
   fixedFromGregorian, formatHebrewDate, hebrewMonthName, PARSHA_NAMES,
-  PARSHA_TABLE, parshaForGregorianDate,
+  parshaForGregorianDate,
 } from "../src/lib/hebrew-calendar.ts";
 
 // Anchors verified against hebcal.com, November 2026.
@@ -94,13 +94,68 @@ test("54 Parsha names in order", () => {
   assert.equal(PARSHA_NAMES[0], "Bereshis");
   assert.equal(PARSHA_NAMES[53], "Vezos Habracha");
 });
-test("Parsha table covers 5786-5787, one entry per Shabbos with a reading", () => {
-  assert.equal(PARSHA_TABLE.length, 97);
-  assert.equal(PARSHA_TABLE[0].date, "2025-09-27");
-  assert.equal(PARSHA_TABLE[PARSHA_TABLE.length - 1].date, "2027-09-25");
-  const seen = new Set(PARSHA_TABLE.map((r) => r.date));
-  assert.equal(seen.size, PARSHA_TABLE.length);
-  for (const row of PARSHA_TABLE) assert.ok(row.parsha.length > 0, row.date);
+test("parsha is computed, not tabulated: spot checks verified against hebcal.com", () => {
+  // 5786 (common year)
+  assert.equal(parshaForGregorianDate(2025, 9, 27), "Vayeilech");
+  assert.equal(parshaForGregorianDate(2026, 3, 14), "Vayakhel-Pekudei"); // double
+  // 5787 (leap year): Vayakhel and Pekudei are read separately.
+  assert.equal(parshaForGregorianDate(2027, 3, 6), "Vayakhel");
+  assert.equal(parshaForGregorianDate(2027, 3, 13), "Pekudei");
+  // Past the old table's end (2027-09-25): the Parsha keeps working.
+  assert.equal(parshaForGregorianDate(2027, 10, 2), null); // Rosh Hashanah Shabbos
+  assert.equal(parshaForGregorianDate(2027, 10, 9), "Ha'azinu");
+  assert.equal(parshaForGregorianDate(2027, 10, 30), "Bereshis"); // 5788
+  assert.equal(parshaForGregorianDate(2028, 1, 1), "Mikeitz");
+  assert.equal(parshaForGregorianDate(2028, 9, 23), "Ha'azinu"); // 5789
+  assert.equal(parshaForGregorianDate(2030, 3, 16), "Vayikra"); // 5790
+  // Cases that caught the first (wrong) doubling rule: 5781 and 5785
+  // read Nitzavim and Vayeilech separately, not combined.
+  assert.equal(parshaForGregorianDate(2021, 3, 13), "Vayakhel-Pekudei"); // 5781
+  assert.equal(parshaForGregorianDate(2021, 9, 4), "Nitzavim");
+  assert.equal(parshaForGregorianDate(2021, 9, 11), "Vayeilech");
+  assert.equal(parshaForGregorianDate(2025, 9, 20), "Nitzavim"); // 5785
+  assert.equal(parshaForGregorianDate(2025, 5, 3), "Tazria-Metzora"); // 5785
+});
+
+test("parsha: a full reading cycle reads portions 1-53 in order", () => {
+  // The Shabbatot from just after Simchat Torah to the next Simchat
+  // Torah, skipping festival Shabbatot and expanding doubled pairs,
+  // must read Bereshis through Ha'azinu in order. (Vezos Habracha is
+  // read on Simchat Torah itself, not on a Shabbos.)
+  for (const year of [5785, 5786, 5787, 5790, 5795]) {
+    const start = fixedFromHebrew(year, 1, 23);
+    const end = fixedFromHebrew(year + 1, 1, 23);
+    const read: string[] = [];
+    for (let f = start + 1; f <= end; f++) {
+      const g = gregorianFromFixed(f);
+      const d = new Date(Date.UTC(g.year, g.month - 1, g.day));
+      if (d.getUTCDay() !== 6) continue;
+      const p = parshaForGregorianDate(g.year, g.month, g.day);
+      if (p !== null) read.push(p);
+    }
+    const expanded = read.flatMap((p) => p.split("-"));
+    assert.deepEqual(expanded, [...PARSHA_NAMES.slice(0, 53)], "cycle " + year);
+  }
+});
+
+test("parsha: every year type 5700-5900 has a schedule (no unknown-type nulls)", () => {
+  // A Shabbos is null only on a festival. If a year type were unknown
+  // the whole year would come back null, so a year with more than a
+  // handful of null Shabbatot is a broken schedule, not a festival.
+  for (let year = 5780; year <= 5806; year++) {
+    const start = fixedFromHebrew(year, 1, 23);
+    const end = fixedFromHebrew(year + 1, 1, 23);
+    let saturdays = 0, nulls = 0;
+    for (let f = start + 1; f <= end; f++) {
+      const g = gregorianFromFixed(f);
+      const d = new Date(Date.UTC(g.year, g.month - 1, g.day));
+      if (d.getUTCDay() !== 6) continue;
+      saturdays++;
+      if (parshaForGregorianDate(g.year, g.month, g.day) === null) nulls++;
+    }
+    assert.ok(saturdays >= 45 && saturdays <= 56, "cycle " + year + " saturdays " + saturdays);
+    assert.ok(nulls >= 2 && nulls <= 6, "cycle " + year + " festival Shabbatot " + nulls);
+  }
 });
 test("parshaForGregorianDate: the coming Shabbos", () => {
   assert.equal(parshaForGregorianDate(2025, 12, 13), "Vayeshev"); // Shabbos itself
@@ -110,9 +165,11 @@ test("parshaForGregorianDate: the coming Shabbos", () => {
   assert.equal(parshaForGregorianDate(2027, 3, 6), "Vayakhel");
   assert.equal(parshaForGregorianDate(2027, 3, 13), "Pekudei");
 });
-test("parshaForGregorianDate: festival Shabbos and out of range return null", () => {
+test("parshaForGregorianDate: festival Shabbos returns null, past dates still work", () => {
   assert.equal(parshaForGregorianDate(2026, 4, 4), null); // Pesach Shabbos
   assert.equal(parshaForGregorianDate(2025, 10, 11), null); // Sukkot Shabbos
   assert.equal(parshaForGregorianDate(2026, 5, 23), null); // Shavuot Shabbos
-  assert.equal(parshaForGregorianDate(2028, 1, 1), null); // past the table
+  // Past the old table's end there is no range limit any more.
+  assert.equal(parshaForGregorianDate(2028, 1, 1), "Mikeitz");
+  assert.equal(parshaForGregorianDate(2035, 6, 2), "Bamidbar");
 });
