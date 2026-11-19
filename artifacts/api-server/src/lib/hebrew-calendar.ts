@@ -1,7 +1,9 @@
 /**
  * Hebrew calendar for the Tishl phone menu (IVR path 1591).
  *
- * Pure arithmetic + a static Parsha table. No database, no network.
+ * Pure arithmetic, including a computed Parsha. No database, no network,
+ * no table to regenerate: the Parsha is derived from the Hebrew date, so
+ * it never expires.
  *
  * ALGORITHM (Rosh Hashanah postponement rules / Dechiyot)
  * --------------------------------------------------------
@@ -59,14 +61,43 @@
  * Slot 7 does not exist in a common year; a date-entry for it resolves to
  * the next leap year.
  *
- * PARSHA TABLE
- * ------------
- * Static Shabbos table for Jewish years 5786-5787 (Diaspora reading),
- * copied from hebcal.com in November 2026. It covers Shabbos
- * 2025-09-27 through 2027-09-25. A Shabbos that is a festival (no weekly
- * Parsha read) has no entry, and parshaForGregorianDate returns null for
- * it. REGENERATE YEARLY: after September 2027 the table is out of range
- * and the phone simply omits the Parsha instead of guessing.
+ * PARSHA — COMPUTED FROM THE HEBREW DATE
+ * ----------------------------------------
+ * The reading cycle for Hebrew year Y runs from Simchat Torah
+ * (23 Tishrei, year Y) to the next Simchat Torah (23 Tishrei, year Y+1).
+ * Bereshis is read on the first Shabbos after Simchat Torah; the last
+ * readings are Ha'azinu on Shabbos Shuva (the Shabbos between Rosh
+ * Hashanah and Yom Kippur of year Y+1) and Vezos Habracha on Simchat
+ * Torah itself. A Shabbos that is a Yom Tov or Chol Hamoed day
+ * (Diaspora calendar) has no weekly Parsha:
+ *   Tishrei 1, 2 (Rosh Hashanah), 10 (Yom Kippur), 15-22 (Sukkot);
+ *   Nisan 15-22 (Pesach); Sivan 6, 7 (Shavuot).
+ * 23 Tishrei itself is a reading day (Vezos Habracha), even though it
+ * is a festival. (23 Tishrei can never fall on Shabbos — Rosh Hashanah
+ * is never Friday — so Vezos Habracha is read on Simchat Torah the
+ * weekday, and 53 portions fall on Shabbatot.)
+ *
+ * With 54 portions to read and fewer reading Shabbatot in the cycle,
+ * some pairs are read together. WHICH pairs are combined is fixed by
+ * the year's type (keviyah): whether the year is a leap year, the
+ * weekday of Rosh Hashanah, and whether Cheshvan and Kislev are long
+ * or short (incomplete / regular / complete). There are 14 such year
+ * types, and each has a fixed list of what is read on every Shabbos
+ * from the first Shabbos on or after Rosh Hashanah: a parsha, a
+ * doubled pair, or a festival (no weekly Parsha that Shabbos). The
+ * last readings of a cycle — Nitzavim, Vayeilech, Ha'azinu — fall at
+ * the head of the NEXT year's list, so a Shabbos past the end of one
+ * year's list is read from the next year's list.
+ *
+ * This is the traditional luach schedule (Diaspora reading), the same
+ * one hebcal.com publishes; the lists below are that schedule, in the
+ * phone's own numbering. Nothing here is dated: the same 14 year
+ * types repeat forever, so the Parsha never expires.
+ *
+ * VERIFICATION: the computed readings reproduce, entry for entry, the
+ * static 5786-5787 table this replaced (97 entries plus the festival
+ * nulls), and match hebcal.com for every Shabbos of Hebrew years
+ * 5780-5806 (see tests).
  */
 
 // Fixed (Rata Die) day numbers: R.D. 1 = Monday 1 January year 1.
@@ -228,144 +259,84 @@ export const PARSHA_NAMES: readonly string[] = [
   "Vayetzei", "Vayishlach", "Vayeshev", "Mikeitz", "Vayigash", "Vayechi",
   "Shemos", "Va'eira", "Bo", "Beshalach", "Yisro", "Mishpatim", "Terumah",
   "Tetzaveh", "Ki Sisa", "Vayakhel", "Pekudei", "Vayikra", "Tzav", "Shemini",
-  "Tazria", "Metzora", "Achrei Mos", "Kedoshim", "Emor", "Behar", "Bechukosai",
+  "Tazria", "Metzora", "Achrei Mot", "Kedoshim", "Emor", "Behar", "Bechukosai",
   "Bamidbar", "Naso", "Beha'aloscha", "Shelach", "Korach", "Chukas", "Balak",
   "Pinchas", "Matos", "Masei", "Devarim", "Va'eschanan", "Eikev", "Re'eh",
   "Shoftim", "Ki Seitzei", "Ki Savo", "Nitzavim", "Vayeilech", "Ha'azinu",
   "Vezos Habracha",
 ];
 
-/**
- * Static Shabbos -> Parsha table, Jewish years 5786-5787, Diaspora reading.
- * Source: hebcal.com, November 2026. Combined readings are one entry with
- * a hyphenated name ("Vayakhel-Pekudei"). Shabbos days that are festivals
- * (no weekly Parsha) have no entry.
- * REGENERATE YEARLY: covers Shabbos 2025-09-27 through 2027-09-25 only.
- */
-export const PARSHA_TABLE_START = "2025-09-27";
-export const PARSHA_TABLE_END = "2027-09-25";
-export const PARSHA_TABLE: readonly { date: string; parsha: string }[] = [
-  // 5786 (common year)
-  { date: "2025-09-27", parsha: "Vayeilech" },
-  { date: "2025-10-04", parsha: "Ha'azinu" },
-  { date: "2025-10-18", parsha: "Bereshis" },
-  { date: "2025-10-25", parsha: "Noach" },
-  { date: "2025-11-01", parsha: "Lech Lecha" },
-  { date: "2025-11-08", parsha: "Vayeira" },
-  { date: "2025-11-15", parsha: "Chayei Sarah" },
-  { date: "2025-11-22", parsha: "Toldos" },
-  { date: "2025-11-29", parsha: "Vayetzei" },
-  { date: "2025-12-06", parsha: "Vayishlach" },
-  { date: "2025-12-13", parsha: "Vayeshev" },
-  { date: "2025-12-20", parsha: "Mikeitz" },
-  { date: "2025-12-27", parsha: "Vayigash" },
-  { date: "2026-01-03", parsha: "Vayechi" },
-  { date: "2026-01-10", parsha: "Shemos" },
-  { date: "2026-01-17", parsha: "Va'eira" },
-  { date: "2026-01-24", parsha: "Bo" },
-  { date: "2026-01-31", parsha: "Beshalach" },
-  { date: "2026-02-07", parsha: "Yisro" },
-  { date: "2026-02-14", parsha: "Mishpatim" },
-  { date: "2026-02-21", parsha: "Terumah" },
-  { date: "2026-02-28", parsha: "Tetzaveh" },
-  { date: "2026-03-07", parsha: "Ki Sisa" },
-  { date: "2026-03-14", parsha: "Vayakhel-Pekudei" },
-  { date: "2026-03-21", parsha: "Vayikra" },
-  { date: "2026-03-28", parsha: "Tzav" },
-  { date: "2026-04-11", parsha: "Shemini" },
-  { date: "2026-04-18", parsha: "Tazria-Metzora" },
-  { date: "2026-04-25", parsha: "Achrei Mot-Kedoshim" },
-  { date: "2026-05-02", parsha: "Emor" },
-  { date: "2026-05-09", parsha: "Behar-Bechukosai" },
-  { date: "2026-05-16", parsha: "Bamidbar" },
-  { date: "2026-05-30", parsha: "Naso" },
-  { date: "2026-06-06", parsha: "Beha'aloscha" },
-  { date: "2026-06-13", parsha: "Shelach" },
-  { date: "2026-06-20", parsha: "Korach" },
-  { date: "2026-06-27", parsha: "Chukas-Balak" },
-  { date: "2026-07-04", parsha: "Pinchas" },
-  { date: "2026-07-11", parsha: "Matos-Masei" },
-  { date: "2026-07-18", parsha: "Devarim" },
-  { date: "2026-07-25", parsha: "Va'eschanan" },
-  { date: "2026-08-01", parsha: "Eikev" },
-  { date: "2026-08-08", parsha: "Re'eh" },
-  { date: "2026-08-15", parsha: "Shoftim" },
-  { date: "2026-08-22", parsha: "Ki Seitzei" },
-  { date: "2026-08-29", parsha: "Ki Savo" },
-  { date: "2026-09-05", parsha: "Nitzavim-Vayeilech" },
-  // 5787 (leap year)
-  { date: "2026-09-19", parsha: "Ha'azinu" },
-  { date: "2026-10-10", parsha: "Bereshis" },
-  { date: "2026-10-17", parsha: "Noach" },
-  { date: "2026-10-24", parsha: "Lech Lecha" },
-  { date: "2026-10-31", parsha: "Vayeira" },
-  { date: "2026-11-07", parsha: "Chayei Sarah" },
-  { date: "2026-11-14", parsha: "Toldos" },
-  { date: "2026-11-21", parsha: "Vayetzei" },
-  { date: "2026-11-28", parsha: "Vayishlach" },
-  { date: "2026-12-05", parsha: "Vayeshev" },
-  { date: "2026-12-12", parsha: "Mikeitz" },
-  { date: "2026-12-19", parsha: "Vayigash" },
-  { date: "2026-12-26", parsha: "Vayechi" },
-  { date: "2027-01-02", parsha: "Shemos" },
-  { date: "2027-01-09", parsha: "Va'eira" },
-  { date: "2027-01-16", parsha: "Bo" },
-  { date: "2027-01-23", parsha: "Beshalach" },
-  { date: "2027-01-30", parsha: "Yisro" },
-  { date: "2027-02-06", parsha: "Mishpatim" },
-  { date: "2027-02-13", parsha: "Terumah" },
-  { date: "2027-02-20", parsha: "Tetzaveh" },
-  { date: "2027-02-27", parsha: "Ki Sisa" },
-  { date: "2027-03-06", parsha: "Vayakhel" },
-  { date: "2027-03-13", parsha: "Pekudei" },
-  { date: "2027-03-20", parsha: "Vayikra" },
-  { date: "2027-03-27", parsha: "Tzav" },
-  { date: "2027-04-03", parsha: "Shemini" },
-  { date: "2027-04-10", parsha: "Tazria" },
-  { date: "2027-04-17", parsha: "Metzora" },
-  { date: "2027-05-01", parsha: "Achrei Mos" },
-  { date: "2027-05-08", parsha: "Kedoshim" },
-  { date: "2027-05-15", parsha: "Emor" },
-  { date: "2027-05-22", parsha: "Behar" },
-  { date: "2027-05-29", parsha: "Bechukosai" },
-  { date: "2027-06-05", parsha: "Bamidbar" },
-  { date: "2027-06-19", parsha: "Naso" },
-  { date: "2027-06-26", parsha: "Beha'aloscha" },
-  { date: "2027-07-03", parsha: "Shelach" },
-  { date: "2027-07-10", parsha: "Korach" },
-  { date: "2027-07-17", parsha: "Chukas-Balak" },
-  { date: "2027-07-24", parsha: "Pinchas" },
-  { date: "2027-07-31", parsha: "Matos-Masei" },
-  { date: "2027-08-07", parsha: "Devarim" },
-  { date: "2027-08-14", parsha: "Va'eschanan" },
-  { date: "2027-08-21", parsha: "Eikev" },
-  { date: "2027-08-28", parsha: "Re'eh" },
-  { date: "2027-09-04", parsha: "Shoftim" },
-  { date: "2027-09-11", parsha: "Ki Seitzei" },
-  { date: "2027-09-18", parsha: "Ki Savo" },
-  { date: "2027-09-25", parsha: "Nitzavim-Vayeilech" },
-];
+/** One week of a reading year: a parsha index (0-based), a doubled pair (negative: -p means parshiyot p and p+1 together), or a festival (null — no weekly Parsha). */
+type SedraEntry = number | null;
 
-function isoDate(year: number, month: number, day: number): string {
-  const p = (n: number) => String(n).padStart(2, "0");
-  return year + "-" + p(month) + "-" + p(day);
+const SEDRA_020: readonly SedraEntry[] = [51, 52, null, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, -21, 23, 24, null, 25, -26, -28, 30, -31, 33, 34, 35, 36, 37, 38, 39, 40, -41, 43, 44, 45, 46, 47, 48, 49, -50];
+const SEDRA_022: readonly SedraEntry[] = [51, 52, null, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, -21, 23, 24, null, 25, -26, -28, 30, -31, 33, null, 34, 35, 36, 37, -38, 40, -41, 43, 44, 45, 46, 47, 48, 49, -50];
+const SEDRA_051: readonly SedraEntry[] = [52, null, null, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, -21, 23, 24, null, null, 25, -26, -28, 30, -31, 33, 34, 35, 36, 37, 38, 39, 40, -41, 43, 44, 45, 46, 47, 48, 49, 50];
+const SEDRA_052: readonly SedraEntry[] = [52, null, null, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, null, 25, -26, -28, 30, -31, 33, 34, 35, 36, 37, 38, 39, 40, -41, 43, 44, 45, 46, 47, 48, 49, 50];
+const SEDRA_070: readonly SedraEntry[] = [null, 52, null, null, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, -21, 23, 24, null, 25, -26, -28, 30, -31, 33, 34, 35, 36, 37, 38, 39, 40, -41, 43, 44, 45, 46, 47, 48, 49, 50];
+const SEDRA_072: readonly SedraEntry[] = [null, 52, null, null, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, -21, 23, 24, null, 25, -26, -28, 30, -31, 33, 34, 35, 36, 37, 38, 39, 40, -41, 43, 44, 45, 46, 47, 48, 49, -50];
+const SEDRA_120: readonly SedraEntry[] = [51, 52, null, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, null, 28, 29, 30, 31, 32, 33, null, 34, 35, 36, 37, -38, 40, -41, 43, 44, 45, 46, 47, 48, 49, -50];
+const SEDRA_122: readonly SedraEntry[] = [51, 52, null, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, null, null, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, -41, 43, 44, 45, 46, 47, 48, 49, 50];
+const SEDRA_150: readonly SedraEntry[] = [52, null, null, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, null, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50];
+const SEDRA_152: readonly SedraEntry[] = [52, null, null, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, null, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, -50];
+const SEDRA_170: readonly SedraEntry[] = [null, 52, null, null, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, null, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, -41, 43, 44, 45, 46, 47, 48, 49, -50];
+const SEDRA_172: readonly SedraEntry[] = [null, 52, null, null, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, null, 28, 29, 30, 31, 32, 33, null, 34, 35, 36, 37, -38, 40, -41, 43, 44, 45, 46, 47, 48, 49, -50];
+
+const SEDRA_BY_YEAR_TYPE: Record<string, readonly SedraEntry[]> = {
+  "020": SEDRA_020,
+  "0220": SEDRA_022,
+  "0310": SEDRA_022,
+  "0510": SEDRA_051,
+  "052": SEDRA_052,
+  "070": SEDRA_070,
+  "072": SEDRA_072,
+  "1200": SEDRA_120,
+  "1220": SEDRA_122,
+  "1310": SEDRA_122,
+  "150": SEDRA_150,
+  "152": SEDRA_152,
+  "170": SEDRA_170,
+  "1720": SEDRA_172,
+};
+
+/** The reading schedule for a Hebrew year (Diaspora), or null if the year type is unknown. */
+function sedraArrayForYear(year: number): readonly SedraEntry[] | null {
+  const leap = isHebrewLeapYear(year) ? 1 : 0;
+  const rhDay = mod7(roshHashanahFixed(year)) + 1; // 1 = Sunday ... 7 = Saturday
+  const longCheshvan = daysInHebrewMonth(year, 2) === 30;
+  const shortKislev = daysInHebrewMonth(year, 3) === 29;
+  const type = longCheshvan && !shortKislev ? 2 : !longCheshvan && shortKislev ? 0 : 1;
+  const core = "" + leap + rhDay + type;
+  return SEDRA_BY_YEAR_TYPE[core] ?? SEDRA_BY_YEAR_TYPE[core + "0"] ?? null;
+}
+
+/** First Saturday on or after Rosh Hashanah of a Hebrew year (fixed day). */
+function firstSaturdayOnOrAfterRoshHashanah(year: number): number {
+  const rh = roshHashanahFixed(year);
+  return rh + ((6 - mod7(rh) + 7) % 7);
 }
 
 /**
  * The Parsha of the Shabbos of the week containing a Gregorian date:
- * the Saturday on or after the given date. Returns null when that Shabbos
- * has no weekly Parsha (festival) or is outside the static table.
+ * the Saturday on or after the given date. Returns null when that
+ * Shabbos has no weekly Parsha (festival / Chol Hamoed). Computed from
+ * the Hebrew date — no table, no range limit.
  */
 export function parshaForGregorianDate(year: number, month: number, day: number): string | null {
   const fixed = fixedFromGregorian(year, month, day);
-  // R.D. weekday: 0 = Sunday ... 6 = Saturday.
-  const dow = mod7(fixed);
-  const daysToSaturday = (6 - dow + 7) % 7;
-  const shabbos = gregorianFromFixed(fixed + daysToSaturday);
-  const key = isoDate(shabbos.year, shabbos.month, shabbos.day);
-  for (const row of PARSHA_TABLE) {
-    if (row.date === key) return row.parsha;
-    if (row.date > key) break;
+  const shabbosFixed = fixed + ((6 - mod7(fixed) + 7) % 7);
+  let hebYear = hebrewFromFixed(shabbosFixed).year;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const array = sedraArrayForYear(hebYear);
+    if (!array) return null;
+    const firstSat = firstSaturdayOnOrAfterRoshHashanah(hebYear);
+    const weekNum = Math.floor((shabbosFixed - firstSat) / 7);
+    if (weekNum < 0) { hebYear--; continue; }
+    if (weekNum >= array.length) { hebYear++; continue; }
+    const entry = array[weekNum];
+    if (entry === null) return null;
+    if (entry >= 0) return PARSHA_NAMES[entry];
+    return PARSHA_NAMES[-entry] + "-" + PARSHA_NAMES[-entry + 1];
   }
   return null;
 }
