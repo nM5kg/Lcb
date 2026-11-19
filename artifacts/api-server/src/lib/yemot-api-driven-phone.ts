@@ -5,9 +5,16 @@ import {applyFixedPhonePhraseEdits} from "../routes/gavhah-hotline-speech-librar
 import { logger } from "./logger";
 import {noteYemotReturnCalls} from "./signalwire-max-return-calls";
 import type { Request, Response } from "express";
-import { phoneNewsVote, saveVoiceNewsReply, phoneNewsSave, phoneNewsReport } from "./yemot-news-engagement";
+import { phoneNewsVote, saveVoiceNewsReply, phoneNewsSave, phoneNewsReport, validRecordedPath } from "./yemot-news-engagement";
 import {enrollFromKeypad,pendingPhoneSignup,cancelPhoneSignup} from "./yemot-phone-signup";
 import {sectionPaths,sectionRequiresLogin,pagedSections,readPhoneSection,currentPhoneActionId,confirmPhoneAction,publicIdSections,readPhonePublicById} from "./yemot-section-batch1";
+import type { PoolClient } from "pg";
+import { getTishlQueue, markTishlDone, deleteTishlItem, setTishlReminder, addTishlNote, toggleTishlHold } from "./tishl-queue";
+import type { TishlQueueItem } from "./tishl-queue";
+import { placeOlamMaxOutboundCall } from "./signalwire-max-outbound";
+import { hebrewFromGregorian, formatHebrewDate, parshaForGregorianDate, isHebrewLeapYear } from "./hebrew-calendar";
+import { TISHL_TZ, parseTishlFlash, encodeTishlFlash, newTishlState, handleTishlDigit, splitSpeechChunks, describeTishlItem, actionMenuSpeech, hebrewMonthChoicesSpeech, buildVoiceNoteText, tzParts } from "./tishl-phone";
+import type { TishlState } from "./tishl-phone";
 
 // ONE provider API bridge. All IVR paths, identities, and records are owned by
 // Gavhah and Neon. No separate provider-side submenus, caller-ID login or
@@ -396,6 +403,120 @@ async function tryFastYemotRoot(req:Request,res:Response,tree:Record<string,Tree
  return true;
 }
 
+// ---------------------------------------------------------------------------
+// Tishl (IVR path 1591, Olam Chesed calling desk).
+// Voice-prompt keys: the staging gavhah_yemot_voice_prompts CHECK constraint
+// was relaxed 2026-11-19 to allow one trailing lowercase letter, so keys
+// like '1591a' ARE stored (24 Tishl drafts, all published_path NULL).
+// Key map (see ~/workspace/yiddish-tts/tishl-phrases.json):
+//   '1591'  = welcome (NOT spoken by the handler — entering Tishl plays the
+//             queue immediately, per Yakob's spec; the draft is voice-studio
+//             stock). '1591a'+'1591b' = action menu parts 1+2.
+//   '1591c' = navigation hint (built into describeTishlItem instead).
+//   '1591d' = date choice. '1591e' = note saved. '1591f' = queue empty.
+//   '1591k' = done. '1591l' = deleted. '1591m' = reminder saved.
+//   '1591n' = held. '1591o' = hold released. '1591u' = calling now (unused:
+//             the dial handoff speaks its own longer text). '1591v' = end of
+//             queue. '1591w' = confirm delete ("press 3 again").
+// Every helper returns a safe fallback when the table has no row.
+// ---------------------------------------------------------------------------
+
+/** Optional voice-prompt override from gavhah_yemot_voice_prompts. Never throws. */
+async function tishlVoicePrompt(client:PoolClient,key:string):Promise<string|null>{
+ try{
+  const r=await client.query<{tts_text:string}>(
+   "SELECT tts_text FROM public.gavhah_yemot_voice_prompts WHERE path=$1",[key]);
+  const t=r.rows[0]?.tts_text;
+  return typeof t==="string"&&t.trim()?t.trim():null;
+ }catch{return null;}
+}
+
+/** Extra spoken detail for a queue item (task priority/deadline, case status/urgency). */
+async function tishlItemExtra(client:PoolClient,item:TishlQueueItem):Promise<string>{
+ if(item.kind==="task"){
+  const r=await client.query<{priority:string;deadline:string|null}>(
+   "SELECT priority,deadline FROM public.askanus_tasks WHERE id=$1",[item.id]);
+  const x=r.rows[0];if(!x)return "";
+  return "Priority "+safeVoice(x.priority,20)+". "+(x.deadline?"Due "+safeVoice(x.deadline,28)+". ":"");
+ }
+ if(item.kind==="case"){
+  const r=await client.query<{status:string;urgency:string}>(
+   "SELECT status,urgency FROM public.askanus_cases WHERE id=$1",[item.id]);
+  const x=r.rows[0];if(!x)return "";
+  return "Status "+safeVoice(x.status,20)+". Urgency "+safeVoice(x.urgency,20)+". ";
+ }
+ return "";
+}
+
+/** Index of a task/case in the newest-first personal list (same order as myPrompt). */
+async function findPersonalIndex(client:PoolClient,userId:number,kind:"task"|"case",id:number):Promise<number>{
+ const table=kind==="task"?"askanus_tasks":"askanus_cases";
+ const r=await client.query<{id:number}>(
+  "SELECT id FROM public."+table+" WHERE user_id=$1 ORDER BY created_at DESC,id DESC LIMIT 200",[userId]);
+ const idx=r.rows.findIndex((x)=>x.id===id);
+ return idx>=0?idx:0;
+}
+
+/** After a removal (done/delete/remind), re-fetch the queue and clamp the position. */
+async function tishlAdvanceAfterRemoval(client:PoolClient,userId:number,st:TishlState):Promise<{state:TishlState|null;empty:boolean}>{
+ const fresh=await getTishlQueue(client,userId);
+ if(!fresh.length)return{state:null,empty:true};
+ // The next item slides into the same index; if the removed item was the
+ // last one, the position lands past the end ("end of queue").
+ if(st.pos>=fresh.length)st.pos=fresh.length;
+ const cur=fresh[st.pos]||null;
+ st.kind=cur?cur.kind:null;st.id=cur?cur.id:null;
+ return{state:st,empty:false};
+}
+
+/**
+ * Missed-call return-call handoff.
+ *
+ * AVOID ROUTE (staging): staging max_return_calls is missing the columns
+ * purpose_text, agent_display_name, selected_digit and expires_at that
+ * signalwire-max-return-calls.ts selects, so this handoff never touches
+ * that table or its code paths. It uses only max_call_sessions plus
+ * placeOlamMaxOutboundCall (signalwire-max-outbound.ts).
+ *
+ * How it works: the existing outbound mechanism calls the AGENT's verified
+ * phone first (SignalWire REST API), then bridges to the missed caller.
+ * The IVR response itself can never dial. The agent's phone will ring
+ * while they are on the IVR call (likely the same handset -> call waiting);
+ * a real return call from the IVR has never been placed and needs a
+ * physical test. The number is tried as a US number first, then once as
+ * a Canadian number if the provider rejects the US guess.
+ * On Yemot (not fromShared) no call is placed: the existing notice is spoken.
+ */
+async function tishlReturnCall(client:PoolClient,userId:number,item:TishlQueueItem,fromShared:boolean):Promise<string>{
+ if(!fromShared)return "This phone menu cannot place calls. To call this number back, use the Olam Chesed calling line. ";
+ const raw=String(item.phone||"");
+ const digits=raw.replace(/\D/g,"");
+ const national=digits.length===11&&digits.startsWith("1")?digits.slice(1):digits;
+ const e164=/^[2-9]\d{2}[2-9]\d{6}$/.test(national)?"+1"+national:null;
+ if(!e164)return "The number for this missed call is not a valid United States or Canada number. Nothing was dialed. ";
+ const ins=await client.query<{id:string}>(
+  "INSERT INTO public.max_call_sessions(user_id,number_e164,destination_country,direction,status,provider) "+
+  "VALUES($1,$2,'US','outbound','prepared','signalwire') RETURNING id",[userId,e164]);
+ const sessionId=ins.rows[0].id;
+ for(const country of ["US","CA"] as const){
+  try{
+   // No campaign ids exist in Tishl, so authorizeCampaign is a stub that
+   // is never called; the session is agent-initiated.
+   await placeOlamMaxOutboundCall(userId,sessionId,async()=>({phone:"",authorized:false}));
+   return "Your verified phone is ringing now. Answer it, and you will be connected to the caller. ";
+  }catch(err){
+   const msg=String((err as {message?:unknown})?.message||"");
+   if(country==="US"&&/could not verify US\/Canada destination/i.test(msg)){
+    // The provider rejected the US guess; retry once as Canada on the same session.
+    await client.query("UPDATE public.max_call_sessions SET destination_country='CA' WHERE id=$1",[sessionId]);
+    continue;
+   }
+   return "The return call could not be started. "+(msg?safeVoice(msg,120)+" ":"");
+  }
+ }
+ return "The return call could not be started. ";
+}
+
 export async function handleYemotApp(req:Request,res:Response,tree:Record<string,TreeNode>):Promise<void>{
  if(await tryFastYemotRoot(req,res,tree))return;
  const from4444=req.path.endsWith("/4444");
@@ -436,8 +557,12 @@ export async function handleYemotApp(req:Request,res:Response,tree:Record<string
   let userId=s.member_id;
   let actionsOpen=s.news_actions_open,replyMode=s.news_reply_mode,replyTarget=s.news_reply_target,reportMode=s.news_report_mode;
   let manualFlash=s.action_flash||"";
-  if(step>9000){step=0;path="";position=0;chunk=0;page=0;confirmId=null;actionsOpen=false;replyMode=false;replyTarget=null;reportMode=false;manualFlash="";}
-  const inputName=(replyMode?"rr":path==="125"?"ln":path==="185"?"rg":(path==="115"||publicIdSections.has(path))&&!confirmId&&!actionsOpen?"ar":"iv")+step;
+  let tishlState:TishlState|null=parseTishlFlash(manualFlash);
+  if(step>9000){step=0;path="";position=0;chunk=0;page=0;confirmId=null;actionsOpen=false;replyMode=false;replyTarget=null;reportMode=false;manualFlash="";tishlState=null;}
+  // Tishl date entry uses the "ar" (article, up to 8 digits) input name and
+  // Tishl voice notes use the "rr" (record) input name.
+  const tishlDateEntry=!!tishlState&&(tishlState.mode==="date-day"||tishlState.mode==="date-month"||tishlState.mode==="date-hour"||tishlState.mode==="date-minute");
+  const inputName=(tishlState?.mode==="note"||replyMode?"rr":tishlDateEntry?"ar":path==="125"?"ln":path==="185"?"rg":(path==="115"||publicIdSections.has(path))&&!confirmId&&!actionsOpen?"ar":"iv")+step;
   const raw=req.body?.[inputName]??req.query[inputName]??(fromNext?req.body?.signalwireDigits:undefined);
   let feedback="";
   let goToProviderManagement=false;
@@ -447,7 +572,8 @@ export async function handleYemotApp(req:Request,res:Response,tree:Record<string
    // Existing Yemot management is usually extension /0 (admin_login).
    // Preserve it on root 0, and keep nested 0 returning to the API root.
    // Moving to /0 DOES NOT bypass the provider admin password.
-   if(digit==="0" && path!=="" && !fromShared){
+   // Path 1591 (Tishl) handles its own 0: back one level, or leave Tishl.
+   if(digit==="0" && path!=="" && path!=="1591" && !fromShared){
     if(path==="185")await cancelPhoneSignup(client,callHash);
     path=path.length>2?path.slice(0,-1):(from4444?"2":"");
     position=0;chunk=0;page=0;confirmId=null;
@@ -474,6 +600,80 @@ export async function handleYemotApp(req:Request,res:Response,tree:Record<string
       feedback="Your access request was saved for administration review. ";
      }else feedback="Your access request is already on file. ";
     }else feedback="Press 1 to request Olam Chesed SignalWire access. ";
+   }else if(path==="1591"){
+    // Tishl. Same linked-member + Olam-access gate as the other 159x paths;
+    // on SignalWire the digit gate is bypassed via treeSelect, so the gate
+    // is checked here again. NOTE: "#" and "*" delivery by Yemot in menu
+    // read mode is UNVERIFIED and needs a physical test.
+    const verified=!!userId&&await memberAllowed(client,{...s,member_id:userId});
+    const accessRow=verified?(await client.query<{status:string}>(
+     "SELECT status FROM public.gavhah_olam_chesed_access WHERE user_id=$1",[userId])).rows[0]:null;
+    if(!verified||accessRow?.status!=="linked"){
+     path="159";tishlState=null;page=0;confirmId=null;
+     feedback="Your Olam Chesed access is not linked. ";
+    }else if(tishlState?.mode==="note"){
+     // The "digit" is the recording Yemot/SignalWire just stored (rr input).
+     // saveVoiceNewsReply's storage pattern is reused for the recording
+     // reference itself: a valid ivr2: path is kept as-is; any other
+     // non-empty reference is stored too (SignalWire's form is unknown),
+     // and the website can play it from tishl_notes.
+     const ref=typeof digit==="string"?digit.trim():"";
+     const noteKind=tishlState.kind,noteId=tishlState.id;
+     if(!noteKind||!noteId){
+      tishlState.mode="action";feedback="The voice note was not saved. ";
+     }else if(!ref||ref==="None"){
+      tishlState.mode="action";feedback="The recording was not accepted. Please try again. ";
+     }else{
+      const kept=validRecordedPath(ref)||ref;
+      await addTishlNote(client,userId!,noteKind,noteId,buildVoiceNoteText(kept,new Date().toISOString()));
+      tishlState.mode="listen";feedback=(await tishlVoicePrompt(client,"1591e"))||"Your voice note is saved on this item. ";
+     }
+    }else{
+     if(!tishlState)tishlState=newTishlState();
+     const queue=await getTishlQueue(client,userId!);
+     const acted=queue[tishlState.pos]||null;
+     if(acted){tishlState.kind=acted.kind;tishlState.id=acted.id;}
+     else{tishlState.kind=null;tishlState.id=null;}
+     const result=handleTishlDigit(tishlState,digit,queue.length,new Date(),TISHL_TZ);
+     tishlState=result.state;feedback+=result.feedback;
+     if(result.effect.type==="leave"){
+      path="159";tishlState=null;page=0;confirmId=null;
+     }else if(result.effect.type==="done"&&acted){
+      await markTishlDone(client,userId!,acted.kind,acted.id);
+      feedback+=(await tishlVoicePrompt(client,"1591k"))||"Marked done. ";
+      const adv=await tishlAdvanceAfterRemoval(client,userId!,tishlState);
+      if(adv.empty){path="159";tishlState=null;page=0;confirmId=null;feedback+="Your Tishl is now empty. ";}
+      else tishlState=adv.state;
+     }else if(result.effect.type==="delete"&&acted){
+      await deleteTishlItem(client,userId!,acted.kind,acted.id);
+      feedback+=(await tishlVoicePrompt(client,"1591l"))||"Deleted. ";
+      const adv=await tishlAdvanceAfterRemoval(client,userId!,tishlState);
+      if(adv.empty){path="159";tishlState=null;page=0;confirmId=null;feedback+="Your Tishl is now empty. ";}
+      else tishlState=adv.state;
+     }else if(result.effect.type==="hold"&&acted){
+      const held=await toggleTishlHold(client,userId!,acted.kind,acted.id);
+      feedback+=held?((await tishlVoicePrompt(client,"1591n"))||"This item is now on hold. It stays on your Tishl. "):((await tishlVoicePrompt(client,"1591o"))||"Hold released. ");
+     }else if(result.effect.type==="remind"&&acted){
+      await setTishlReminder(client,userId!,acted.kind,acted.id,result.effect.at);
+      feedback+=(await tishlVoicePrompt(client,"1591m"))||"Reminder saved. ";
+      const adv=await tishlAdvanceAfterRemoval(client,userId!,tishlState);
+      if(adv.empty){path="159";tishlState=null;page=0;confirmId=null;feedback+="Your Tishl is now empty. ";}
+      else tishlState=adv.state;
+     }else if(result.effect.type==="contextual"&&acted){
+      if(acted.kind==="missed_call"){
+       feedback+=await tishlReturnCall(client,userId!,acted,fromShared);
+      }else if(acted.kind==="task"||acted.kind==="case"){
+       // Jump to the Tasks/Cases section at this item's index, newest-first.
+       page=await findPersonalIndex(client,userId!,acted.kind,acted.id);
+       path=acted.kind==="task"?"121":"122";confirmId=null;tishlState=null;
+       feedback+=acted.kind==="task"?"Opening your tasks. ":"Opening your cases. ";
+      }
+     }
+     if(tishlState&&(result.effect.type==="none"||result.effect.type==="contextual"||result.effect.type==="hold")){
+      const cur=queue[tishlState.pos]||null;
+      tishlState.kind=cur?cur.kind:null;tishlState.id=cur?cur.id:null;
+     }
+    }
    }else if(!from4444 && !fromNext && ready4444 && path==="" && digit==="4444"){
     goToCampaignExtension=true;
    }else if(!from4444 && directGavhah && path==="" && /^[1-9]$/.test(digit) && tree["1"]?.children?.[digit]){
@@ -731,13 +931,86 @@ export async function handleYemotApp(req:Request,res:Response,tree:Record<string
   }else if(actionsOpen){
    const articleId=await currentNewsId(path,position,confirmId);
    spoken+=await actionsMenu(client,articleId,userId,await memberAllowed(client,{...s,member_id:userId}));
+  }else if(path==="1591"){
+   // Tishl. The gate is checked again here (defense in depth): on SignalWire
+   // the digit gate is bypassed via treeSelect, so this branch re-checks the link.
+   const verified=!!userId&&await memberAllowed(client,{...s,member_id:userId});
+   const accessRow=verified?(await client.query<{status:string}>(
+    "SELECT status FROM public.gavhah_olam_chesed_access WHERE user_id=$1",[userId])).rows[0]:null;
+   if(!verified||accessRow?.status!=="linked"){
+    path="159";tishlState=null;page=0;confirmId=null;
+    spoken=!verified
+     ?"Olam Chesed Communication is a separate SignalWire service. To apply, securely link your Gavhah account under My Askanus option 2 then 5, or fill the website access request form. Press zero to go back."
+     :"Your Olam Chesed request is "+(accessRow?.status==="requested"?"awaiting administration":accessRow?.status==="reviewing"?"under review":"not approved")+". Press 1 to send an access request to administration. Press zero to go back.";
+   }else{
+    if(!tishlState)tishlState=newTishlState();
+    const queue=await getTishlQueue(client,userId!);
+    if(tishlState.pos>queue.length)tishlState.pos=queue.length;
+    const item=queue[tishlState.pos]||null;
+    page=tishlState.pos;
+    confirmId=item?item.id:null;
+    const nowParts=tzParts(new Date(),TISHL_TZ);
+    const todayHebrew=hebrewFromGregorian(nowParts.year,nowParts.month,nowParts.day);
+    if(!queue.length){
+     const emptyText=await tishlVoicePrompt(client,"1591f");
+     path="159";tishlState=null;page=0;confirmId=null;
+     spoken+=(emptyText||"You have no items on your Tishl. ");
+    }else if(tishlState.mode==="date-choice"){
+     mode="menu";
+     const parsha=parshaForGregorianDate(nowParts.year,nowParts.month,nowParts.day);
+     const choice=await tishlVoicePrompt(client,"1591d");
+     spoken+="Today is "+formatHebrewDate(todayHebrew)+"."+(parsha?" This week's Parsha is "+parsha+".":"")+" "+(choice||"Press 1 for a Jewish date, 2 for numbers.");
+    }else if(tishlState.mode==="date-day"||tishlState.mode==="date-month"||tishlState.mode==="date-hour"||tishlState.mode==="date-minute"){
+     mode="article";
+     if(tishlState.mode==="date-day")spoken+=tishlState.dateKind==="jewish"
+      ?"Enter the day of the Jewish month, 1 to 30, then press pound. Press star to go back."
+      :"Enter the day of the month, 1 to 31, then press pound. Press star to go back.";
+     else if(tishlState.mode==="date-month"){
+      if(tishlState.dateKind==="jewish"){
+       // Offer Adar II too when the next Hebrew year is a leap year.
+       const nextLeap=!isHebrewLeapYear(todayHebrew.year)&&isHebrewLeapYear(todayHebrew.year+1);
+       spoken+=hebrewMonthChoicesSpeech(todayHebrew.year,nextLeap)+" Enter the month number, then press pound. Press star to go back.";
+      }else spoken+="Enter the month as a number, 1 for January through 12 for December, then press pound. Press star to go back.";
+     }
+     else if(tishlState.mode==="date-hour")spoken+="Enter the hour, 0 to 23, then press pound. Press star to go back.";
+     else spoken+="Enter the minute, 0 to 59, then press pound. Press star to go back.";
+    }else if(tishlState.mode==="note"){
+     mode="record";
+     // No draft row exists for the record prompt itself; the built-in text
+     // is the prompt. The "note saved" confirmation (1591e) is spoken after.
+     spoken+="Record your voice note after the beep and press pound when finished. You may cancel by hanging up.";
+    }else if(tishlState.mode==="action"){
+     mode="menu";
+     const menuA=await tishlVoicePrompt(client,"1591a");
+     const menuB=await tishlVoicePrompt(client,"1591b");
+     const menuText=(menuA||menuB)?[menuA,menuB].filter(Boolean).join(" "):null;
+     spoken+=menuText||actionMenuSpeech(item);
+    }else if(tishlState.mode==="confirm-delete"){
+     mode="menu";
+     const confirmText=await tishlVoicePrompt(client,"1591w");
+     spoken+=confirmText||"Press 3 again to delete this item, or any other key to cancel.";
+    }else{
+     mode="menu";
+     if(tishlState.pos>=queue.length){
+      const endText=await tishlVoicePrompt(client,"1591v");
+      spoken+=endText||"You have reached the end of your Tishl. Press pound to hear them again from the start, or press star to go back.";
+     }else if(tishlState.fullRead&&item){
+      const chunks=splitSpeechChunks(item.detail,215);
+      const part=Math.min(tishlState.chunk||0,chunks.length-1);
+      spoken+=(chunks[part]||"This message has no text.")+". Press 2 for the next part, or 9 to return to the list.";
+     }else if(item){
+      const extra=await tishlItemExtra(client,item);
+      spoken+=describeTishlItem(item,tishlState.pos,queue.length,extra);
+     }
+    }
+   }
   }else if(path==="159"||path.startsWith("159")){
    const verified=!!userId&&await memberAllowed(client,{...s,member_id:userId});
    const row=verified?(await client.query<{status:string}>(
     "SELECT status FROM public.gavhah_olam_chesed_access WHERE user_id=$1",[userId])).rows[0]:null;
    if(!verified){
     path="159";
-    spoken="Olam Chesed Communication is a separate SignalWire service. To apply, securely link your Gavhah account under My Askanus option 2 then 5, or fill the website access request form. Press zero to go back.";
+    spoken=feedback+"Olam Chesed Communication is a separate service. To apply, securely link your Gavhah account under My Askanus option 2 then 5, or fill the website access request form. Press zero to go back.";
    }else if(row?.status!=="linked"){
     path="159";
     spoken=feedback+(row
@@ -745,13 +1018,18 @@ export async function handleYemotApp(req:Request,res:Response,tree:Record<string
      :"Your SignalWire Olam Chesed account is not linked. ");
     spoken+="Press 1 to send an access request to administration. Press zero to go back.";
    }else if(path==="159"){
-    spoken="Your separate Olam Chesed SignalWire account is marked linked. "+
+    // NOTE: spoken starts as feedback (line ~926). Keep it: when a Tishl
+    // action empties the queue the caller lands here and must still hear
+    // e.g. "Done. ... Your Tishl is now empty." before the 159 menu.
+    // Words like SignalWire/Yemot are replaced by safeVoice, so this text
+    // (and the Tishl dial notice) avoids them entirely.
+    spoken=feedback+"Your separate Olam Chesed account is marked linked. "+
      "For Tishl and the calling desk press 1. Calls 2. Donor contacts 3. Pledges 4. "+
      "Follow ups 5. Conferences 6. Team 7. Reports 8. Support 9. "+
-     "These functions are handled by SignalWire, not the Yemot keypad. Press zero to go back.";
+     "These functions are handled by the Olam Chesed calling line, not this phone keypad. Press zero to go back.";
    }else{
-    spoken="This Olam Chesed function belongs to the separate SignalWire communication service. "+
-     "This Yemot menu cannot originate SignalWire calls. Open the Olam Chesed Communication website. Press zero to go back.";
+    spoken=feedback+"This Olam Chesed function belongs to the separate calling service. "+
+     "This phone menu cannot place calls. Open the Olam Chesed Communication website. Press zero to go back.";
    }
   }else if(path==="185"){
    mode="registration";
@@ -787,7 +1065,7 @@ export async function handleYemotApp(req:Request,res:Response,tree:Record<string
    // Do not repeat the entire contact queue or the menu customization.
    const pending=readManualResultPending(manualFlash)!;
    if(!feedback)spoken+=pending.stage==="choose"?choosePrompt:confirmationPrompt(pending);
-  }else if(!fromNext&&!fromShared && (path==="14"||["141","142","143","144","1591","1592","1599"].includes(path))){
+  }else if(!fromNext&&!fromShared && (path==="14"||["141","142","143","144","1592","1599"].includes(path))){
    // Yemot NEVER places MAX outbound calls. Caller ID alone never confirms an account.
    const linkedMember=await memberAllowed(client,{...s,member_id:userId});
    if(!linkedMember){
@@ -822,7 +1100,10 @@ export async function handleYemotApp(req:Request,res:Response,tree:Record<string
    if(!path && directGavhah && !from4444)mode="root";
    spoken+=menuPrompt(path,tree,ready4444,fromNext,fromShared);
   }
-  if(path!=="141")manualFlash="";
+  // Tishl state survives while the caller is on path 1591; it is cleared
+  // when leaving Tishl (the digit branch sets tishlState=null then).
+  if(path==="1591"&&tishlState)manualFlash=encodeTishlFlash(tishlState);
+  if(path!=="141"&&path!=="1591")manualFlash="";
   await client.query("UPDATE public.gavhah_yemot_call_states "+
    "SET step=$2,path=$3,news_position=$4,news_chunk=$5,phone_page=$6,selected_item_id=$7,member_id=$8,linked_until=$9,login_failures=$10,news_actions_open=$11,news_reply_mode=$12,news_reply_target=$13,news_report_mode=$14,action_flash=$15,updated_at=now() "+
    "WHERE call_hash=$1",[callHash,step,path,position,chunk,page,confirmId,userId,s.linked_until,s.login_failures,actionsOpen,replyMode,replyTarget,reportMode,manualFlash]);
