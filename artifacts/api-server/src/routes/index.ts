@@ -55,6 +55,7 @@ import siteCopyRouter from "./site-copy";
 import systemErrorsRouter from "./system-errors";
 import engagementRouter from "./engagement";
 import pinnedAnnouncementsRouter from "./pinned-announcements";
+import tishlAdminRouter from "./tishl-admin";
 
 const router: IRouter = Router();
 
@@ -149,5 +150,6 @@ router.use(siteCopyRouter);
 router.use(systemErrorsRouter);
 router.use(engagementRouter);
 router.use(pinnedAnnouncementsRouter);
+router.use(tishlAdminRouter);
 
 export default router;
