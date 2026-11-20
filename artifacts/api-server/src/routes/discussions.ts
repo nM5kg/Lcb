@@ -8,6 +8,7 @@ import { publicPostForViewer } from "../lib/public-posting-identity";
 import { logActivity } from "../lib/activity";
 import { notifyUser, notifyStaff } from "../lib/notify";
 import { getEngagementSetting } from "../lib/engagement-settings";
+import { recordingStatusFor } from "../lib/post-audio";
 
 const router: IRouter = Router();
 
@@ -70,7 +71,8 @@ router.get("/discussions/:id", requireAuth, async (req, res): Promise<void> => {
   const [disc] = await db.select().from(discussionsTable).where(eq(discussionsTable.id, id));
   if (!disc) { res.status(404).json({ error: "Not found" }); return; }
   await db.update(discussionsTable).set({ views: sql`${discussionsTable.views} + 1` }).where(eq(discussionsTable.id, id));
-  res.json(publicPostForViewer({ ...disc, views: disc.views + 1 }, getSessionUserId(req), getSessionUserRole(req)));
+  const recordingStatus = await recordingStatusFor("discussion", id, getSessionUserId(req) ?? null, getSessionUserRole(req) ?? null);
+  res.json({ ...publicPostForViewer({ ...disc, views: disc.views + 1 }, getSessionUserId(req), getSessionUserRole(req)), recordingStatus });
 });
 
 router.patch("/discussions/:id", requireAuth, async (req, res): Promise<void> => {

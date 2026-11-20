@@ -7,6 +7,7 @@ import { resolvePublicPostingName } from "../lib/user-display";
 import { publicPostForViewer } from "../lib/public-posting-identity";
 import { deleteManagedMediaUrl } from "../lib/media-cleanup";
 import { logActivity } from "../lib/activity";
+import { recordingStatusFor } from "../lib/post-audio";
 
 const router: IRouter = Router();
 
@@ -14,11 +15,17 @@ function isStaffRole(role?: string) {
   return role === "admin" || role === "moderator" || role === "super_admin";
 }
 
-const NEWS_CATEGORIES = new Set([
-  "emergency_appeal", "fundraising", "announcement", "volunteer_call",
-  "alert", "org_update", "bikur_cholim", "community", "medical", "wedding",
-]);
 const NEWS_URGENCIES = new Set(["normal", "high", "breaking"]);
+
+// Free-text category (Yakob 2026-11-20): the post form no longer offers
+// a fixed list — the user types any category. Stored as-is (max 100
+// chars); empty falls back to "announcement". Existing posts keep their
+// stored category; the list/detail pages already display an unknown
+// category as its raw text (CATEGORY_LABELS[category] ?? category).
+const cleanFreeCategory = (value: unknown): string => {
+  const text = String(value || "").trim();
+  return text ? text.slice(0, 100) : "announcement";
+};
 
 function validOptionalDate(value: unknown) {
   return value === undefined || value === null || value === "" || /^\d{4}-\d{2}-\d{2}$/.test(String(value));
@@ -46,14 +53,10 @@ router.post("/news", requireAuth, async (req, res): Promise<void> => {
   const { title, content, summary, imageUrl, category, urgency, deadline, organization, isFeatured, authorName } = req.body;
   const cleanTitle = String(title || "").trim();
   const cleanContent = String(content || "").trim();
-  const cleanCategory = String(category || "announcement");
+  const cleanCategory = cleanFreeCategory(category);
   const cleanUrgency = String(urgency || "normal");
   if (!cleanTitle || !cleanContent) {
     res.status(400).json({ error: "title and content required" });
-    return;
-  }
-  if (!NEWS_CATEGORIES.has(cleanCategory)) {
-    res.status(400).json({ error: "invalid category" });
     return;
   }
   if (!NEWS_URGENCIES.has(cleanUrgency)) {
@@ -88,7 +91,8 @@ router.get("/news/:id", async (req, res): Promise<void> => {
   const id = parseInt(raw, 10);
   const [article] = await db.select().from(newsTable).where(eq(newsTable.id, id));
   if (!article) { res.status(404).json({ error: "Not found" }); return; }
-  res.json(publicPostForViewer(article, getSessionUserId(req), getSessionUserRole(req)));
+  const recordingStatus = await recordingStatusFor("news", id, getSessionUserId(req) ?? null, getSessionUserRole(req) ?? null);
+  res.json({ ...publicPostForViewer(article, getSessionUserId(req), getSessionUserRole(req)), recordingStatus });
 });
 
 router.post("/news/:id/like", requireAuth, async (req, res): Promise<void> => {
@@ -150,9 +154,7 @@ router.patch("/news/:id", requireAuth, async (req, res): Promise<void> => {
   if (summary !== undefined) updates.summary = summary ? String(summary).trim().slice(0, 1500) : null;
   if (imageUrl !== undefined) updates.imageUrl = imageUrl ? String(imageUrl).trim().slice(0, 2000) : null;
   if (category !== undefined) {
-    const clean = String(category);
-    if (!NEWS_CATEGORIES.has(clean)) { res.status(400).json({ error: "invalid category" }); return; }
-    updates.category = clean;
+    updates.category = cleanFreeCategory(category);
   }
   if (urgency !== undefined) {
     const clean = String(urgency);
