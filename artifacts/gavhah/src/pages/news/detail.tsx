@@ -21,6 +21,7 @@ import { useToast } from "@/hooks/use-toast";
 import { useEngagementSettings, settingFor } from "@/lib/engagement-settings";
 import { ImageUploadField } from "@/components/shared/image-upload-field";
 import { NewsVoiceReplies } from "@/components/news/phone-voice-replies";
+import { PostRecordingPlayer } from "@/components/shared/post-recording-player";
 
 const CATEGORY_LABELS: Record<string, string> = {
   medical: "Medical Assistance",
@@ -265,6 +266,8 @@ function ArticleBody({ article }: { article: any }) {
           <p key={i}>{para}</p>
         ))}
       </div>
+
+      <PostRecordingPlayer postType="news" postId={article.id} recordingStatus={article.recordingStatus} canReview={isAdmin} />
 
       <NewsVoiceReplies newsId={article.id} />
 

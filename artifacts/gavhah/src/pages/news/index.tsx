@@ -8,7 +8,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { Badge } from "@/components/ui/badge";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
-import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import {
   useListNews, useCreateNews, getListNewsQueryKey,
 } from "@workspace/api-client-react";
@@ -19,12 +19,13 @@ import { useEngagementSettings, settingFor } from "@/lib/engagement-settings";
 import { DisplayAsSelector, type DisplayAs, getDisplayName } from "@/components/shared/display-as-selector";
 import {
   Search, Plus, Eye, Heart, Star, Globe, ChevronRight,
-  AlertTriangle, Clock, Building2, Megaphone, HandHeart, Siren
+  AlertTriangle, Clock, Building2, Megaphone, HandHeart, Siren, Lock
 } from "lucide-react";
 import { formatGregorianDate } from "@/lib/gregorian-date";
 import { useLikeArticle } from "@/hooks/use-like-article";
 import { UpvoteButton } from "@/components/shared/upvote-button";
 import { ImageUploadField } from "@/components/shared/image-upload-field";
+import { AudioRecordingField, uploadPostRecording, type AudioRecordingValue } from "@/components/shared/audio-recording-field";
 
 // --- Category config ---
 const CATEGORIES = [
@@ -74,10 +75,18 @@ function PostUpdateDialog() {
   const { user, isAuthenticated } = useAuth();
   const createNews = useCreateNews();
   const [open, setOpen] = useState(false);
+  // Proper member lock: a signed-out user never gets the composer, only this
+  // gate dialog with Sign in / Join. (Before, the "Post Update" button was a
+  // Radix DialogTrigger: the toast warned "Sign in to post updates" but the
+  // trigger opened the composer anyway once the toast went away.)
+  const [gateOpen, setGateOpen] = useState(false);
   const [displayAs, setDisplayAs] = useState<DisplayAs>("nickname");
+  const [recording, setRecording] = useState<AudioRecordingValue>(null);
   const [form, setForm] = useState({
     title: "", content: "", summary: "", organization: "", imageUrl: "",
-    category: "announcement", urgency: "normal", deadline: "",
+    // Free-text category (Yakob 2026-11-20): no fixed list — the user
+    // types any category. Empty falls back to "announcement" on the server.
+    category: "", urgency: "normal", deadline: "",
   });
 
   const s = (k: keyof typeof form) => (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement> | string) =>
@@ -85,7 +94,8 @@ function PostUpdateDialog() {
 
   const handleTrigger = () => {
     if (!isAuthenticated) {
-      toast({ title: "Sign in to post updates", description: "Join Gavhah free to share community updates." });
+      // Real lock: open the sign-in / join gate, never the composer.
+      setGateOpen(true);
       return;
     }
     setOpen(true);
@@ -93,6 +103,13 @@ function PostUpdateDialog() {
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
+    // Defense in depth: never submit while signed out, even if the composer
+    // was somehow opened (the server also rejects this with 401).
+    if (!isAuthenticated) {
+      setOpen(false);
+      setGateOpen(true);
+      return;
+    }
     if (!form.title || !form.content) return;
     const authorName = getDisplayName(displayAs, user);
     createNews.mutate(
@@ -106,7 +123,16 @@ function PostUpdateDialog() {
           });
           void qc.invalidateQueries({ queryKey: ["/api/news"] });
           setOpen(false);
-          setForm({ title: "", content: "", summary: "", organization: "", imageUrl: "", category: "announcement", urgency: "normal", deadline: "" });
+          // The recording attaches after the post exists (it needs the id).
+          if (recording) {
+            const attached = recording;
+            void uploadPostRecording("news", article.id, attached).then((r) => {
+              if (r.ok) toast({ title: "Recording attached", description: "Your recording waits for review before it reaches the hotline." });
+              else toast({ title: "Update posted, recording not attached", description: r.error || "Please try attaching the recording again.", variant: "destructive" });
+            });
+          }
+          setRecording(null);
+          setForm({ title: "", content: "", summary: "", organization: "", imageUrl: "", category: "", urgency: "normal", deadline: "" });
           toast({ title: "Update posted", description: "Your community update has been published." });
         },
         onError: () => toast({ title: "Error", description: "Could not post update. Please try again.", variant: "destructive" }),
@@ -115,13 +141,18 @@ function PostUpdateDialog() {
   };
 
   return (
-    <Dialog open={open} onOpenChange={setOpen}>
-      <DialogTrigger asChild>
-        <Button className="bg-secondary hover:bg-secondary/90 text-white gap-2 shrink-0" onClick={handleTrigger}>
-          <Plus className="h-4 w-4" /> Post Update
-        </Button>
-      </DialogTrigger>
-      <DialogContent className="sm:max-w-lg max-h-[90vh] overflow-y-auto">
+    <>
+      {/* Plain button, NOT a DialogTrigger: a trigger would open the composer
+          even when handleTrigger refuses (that was the hole). */}
+      <Button className="bg-secondary hover:bg-secondary/90 text-white gap-2 shrink-0" onClick={handleTrigger}>
+        <Plus className="h-4 w-4" /> Post Update
+      </Button>
+      <Dialog open={open} onOpenChange={(v) => {
+        // Never let the composer open while signed out.
+        if (v && !isAuthenticated) { setGateOpen(true); return; }
+        setOpen(v);
+      }}>
+        <DialogContent className="sm:max-w-lg max-h-[90vh] overflow-y-auto">
         <DialogHeader>
           <DialogTitle className="font-serif text-2xl text-primary">Post Community Update</DialogTitle>
           <p className="text-sm text-muted-foreground">Share an announcement, alert, campaign, or volunteer call with the community.</p>
@@ -130,14 +161,15 @@ function PostUpdateDialog() {
           <div className="grid grid-cols-2 gap-3">
             <div className="space-y-1.5">
               <Label className="font-semibold">Category</Label>
-              <Select value={form.category} onValueChange={s("category")}>
-                <SelectTrigger className="h-11"><SelectValue /></SelectTrigger>
-                <SelectContent>
-                  {CATEGORIES.filter(c => c.value !== "all").map(c => (
-                    <SelectItem key={c.value} value={c.value}>{c.label}</SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
+              {/* Free-text category (Yakob 2026-11-20): no list — type any
+                  category. Existing posts keep their stored category. */}
+              <Input
+                value={form.category}
+                onChange={s("category")}
+                placeholder="Type a category, e.g. Announcement"
+                maxLength={100}
+                className="h-11"
+              />
             </div>
             <div className="space-y-1.5">
               <Label className="font-semibold">Urgency</Label>
@@ -188,12 +220,35 @@ function PostUpdateDialog() {
             <Textarea value={form.content} onChange={s("content")} placeholder="All relevant information, context, and action items..." className="min-h-36 resize-none" required />
           </div>
 
-          <Button type="submit" className="w-full bg-secondary hover:bg-secondary/90 text-white h-12 font-semibold gap-2" disabled={createNews.isPending}>
+          <AudioRecordingField value={recording} onChange={setRecording} />
+
+          <Button type="submit" className="w-full bg-secondary hover:bg-secondary/90 text-white h-12 font-semibold gap-2" disabled={createNews.isPending || !isAuthenticated}>
             <Megaphone className="h-4 w-4" /> {createNews.isPending ? "Publishing..." : "Publish Update"}
           </Button>
         </form>
       </DialogContent>
-    </Dialog>
+      </Dialog>
+      {/* Member lock for signed-out users: sign in or join, no composer. */}
+      <Dialog open={gateOpen} onOpenChange={setGateOpen}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <div className="inline-flex items-center justify-center h-12 w-12 rounded-xl bg-primary/10 text-primary mb-2">
+              <Lock className="h-6 w-6" />
+            </div>
+            <DialogTitle className="font-serif text-2xl text-primary">Sign in to post updates</DialogTitle>
+            <p className="text-sm text-muted-foreground">Join Gavhah free to share community updates. Membership is free; you can continue after joining.</p>
+          </DialogHeader>
+          <div className="flex flex-col gap-3 pt-2">
+            <Link href="/register?return=/news">
+              <Button className="w-full bg-secondary hover:bg-secondary/90 text-white h-12 font-semibold">Join Free</Button>
+            </Link>
+            <Link href="/login?return=/news">
+              <Button variant="outline" className="w-full h-12 font-semibold">Already a member? Sign in</Button>
+            </Link>
+          </div>
+        </DialogContent>
+      </Dialog>
+    </>
   );
 }
 
