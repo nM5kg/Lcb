@@ -12,12 +12,17 @@ import express,{type Express,type ErrorRequestHandler} from "express";
 import cors from "cors";
 import session from "express-session";
 import router from "./routes";
-import {pool} from "@workspace/db";
+import {pool, purgeIdleClients} from "@workspace/db";
 import {PostgresSessionStore} from "./lib/postgres-session-store";
 import {sessionOptions,usesPostgresSessions} from "./lib/session-options";
 
 const app:Express=express();
 app.set("trust proxy",1);
+
+// A pg client that survives from a previous request hangs on its next query
+// (verified: fresh 19/19 ok, reused 0/11) — drop idle clients now, before
+// the session store or any route can acquire one. See purgeIdleClients.
+app.use((_req,_res,next)=>{ purgeIdleClients(); next(); });
 
 // A Cloudflare-native, non-pino request logger avoids CJS pino-http startup
 // defects while keeping req.log.error usable in our current error middleware.
