@@ -76,6 +76,65 @@ export const phoneTree: Record<string,Item> = {
       "5":leaf("SignalWire provider connection, WEBSITE ONLY","/founder/signalwire","API tokens and provider credentials must NEVER be spoken over the phone. This protected administration setting requires secure website authentication.")
     })
   }),
+  // TRUE 16-department menu (live v117): the studio rootChoices() paths
+  // 9702/9703/9704/9706/9708/9716/97190/97193 as REAL tree branches.
+  // Paths starting with "9" are never entered digit-by-digit from the root
+  // (no root digit maps to "9..."); the root map in true-menu.ts jumps
+  // straight to them, and treeSelect/menuPrompt walk them digit-by-digit
+  // from there. The intermediate "9"/"97"/"970"/"971" nodes are structural
+  // only: pressing 0 inside a 97xx department returns to the root (see
+  // handleYemotApp), never to an intermediate node.
+  // Children of 9708/97193/9703 are LISTING labels for menuPrompt; the digit
+  // branch in handleYemotApp redirects them to the real sections
+  // (161/162/163/164, 164/153/152, 132). Children of 97190 are aliases of
+  // the public-by-number sections (see yemot-section-batch1.ts).
+  "9":group("Gavhah departments by number",{
+    "7":group("Departments",{
+      "0":group("Departments",{
+        "2":group("Askanim discussions",{
+          "1":leaf("All discussions, newest first","/forum"),
+          "2":leaf("Read a discussion by its number","/forum/:id")
+        }),
+        "3":group("Private help requests",{
+          "1":leaf("Help options","/united","Private help options are not yet available on the phone. Use the website to ask for assistance. Press zero to return to the main menu."),
+          "9":leaf("Private connections","/communications","Your private Gavhah connections.")
+        }),
+        "4":group("Hitkabtzu Letovah",{
+          "1":leaf("Join the cause","/charity","Joining the cause by phone is not yet available. Use the website. Press zero to return to the main menu."),
+          "2":leaf("Submit a proposal for team review","/charity","Submitting a proposal by phone is not yet available. Use the website. Press zero to return to the main menu.")
+        }),
+        "6":group("Today's charity campaign",{
+          "2":leaf("Suggest a cause","/charity","Suggesting a cause by phone is not yet available. Use the website. Press zero to return to the main menu.")
+        }),
+        "8":group("Community groups",{
+          "1":leaf("Groups","/groups","Public community groups."),
+          "2":leaf("Discussion forum","/forum","Public discussion forum."),
+          "3":leaf("Directory","/directory","Public directory."),
+          "4":leaf("Connections","/connections","Your connections.")
+        })
+      }),
+      "1":group("Departments",{
+        "6":group("Contact a member by ID",{
+          "1":leaf("Contact a member","/directory","Contacting a member by ID from the phone is not yet available. Use the website directory. Press zero to return to the main menu."),
+          "2":leaf("How it works","/directory","To contact a Gavhah member, enter their member ID on the website directory. Press zero to return to the main menu.")
+        }),
+        "9":group("Search and connections",{
+          "0":group("Search public records by Gavhah account number",{
+            "1":leaf("Find a published charity campaign by number","/charity/:id"),
+            "2":leaf("Find a public forum topic by number","/forum/:id"),
+            "3":leaf("Find a public group by number","/groups/:id"),
+            "4":leaf("Find an approved minyan by number","/minyans/:id"),
+            "5":leaf("Gavhah account search for more topics and names","/search","For text searches and other topics, use the website search page. Press zero to return to the main menu.")
+          }),
+          "3":group("My Connections",{
+            "1":leaf("Connections list","/connections","Your connections list."),
+            "2":leaf("Volunteer application","/united","Volunteer application."),
+            "3":leaf("Help from Askanim","/united","Help from Askanim.")
+          })
+        })
+      })
+    })
+  }),
   "2":group("Campaign Center",{
     "1":group("Campaigns",{
       "1":leaf("My campaigns","/"),"2":leaf("Campaign dashboard","/"),

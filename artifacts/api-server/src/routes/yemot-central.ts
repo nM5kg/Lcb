@@ -118,24 +118,39 @@ router.post("/admin/yemot/test", requireAuth, admin, wrap(async (_req, res) => {
   catch { err(res, 503, "Encrypted token cannot be read; verify the server encryption key"); return; }
   let verified = false;
   let templates = 0;
+  let providerReason = "";
   try {
     const response = await fetch("https://www.call2all.co.il/ym/api/GetTemplates", {
       method: "POST",
       headers: { "Content-Type": "application/json", "Accept": "application/json" },
       body: JSON.stringify({ token }),
-      redirect: "error",
+      redirect: "manual",
       cache: "no-store",
       signal: AbortSignal.timeout(12000)
     });
-    if (!response.ok) throw new Error("Provider rejected request");
-    const data: any = await response.json();
-    if (!data || data.responseStatus !== "OK" || !Array.isArray(data.templates)) throw new Error("Provider validation failed");
+    const httpStatus = response.status;
+    let data: any = null;
+    try { data = await response.json(); } catch { data = null; }
+    const detail = (label: string) => {
+      const parts = [`Yemot HTTP ${httpStatus}`, label];
+      if (data && typeof data.message === "string" && data.message) parts.push(String(data.message).slice(0, 200));
+      return parts.join(" · ");
+    };
+    if (!response.ok) {
+      providerReason = detail("HTTP rejected");
+      throw new Error("Provider rejected request");
+    }
+    if (!data || data.responseStatus !== "OK" || !Array.isArray(data.templates)) {
+      providerReason = detail(String(data?.responseStatus ?? "no responseStatus"));
+      throw new Error("Provider validation failed");
+    }
     verified = true;
     templates = data.templates.length;
-  } catch {
+  } catch (e) {
     // If provider verification stops working, revoke the stored verification and disable use.
     await pool.query("UPDATE " + table + " SET enabled=false,last_verified_at=NULL WHERE id=1 AND token_ciphertext=$1", [row.token_ciphertext]);
-    res.status(502).json({ connected: false, error: "ימות API connection test failed. Check the provider token and permissions." });
+    const reason = providerReason || (e instanceof Error ? e.message : "Unknown provider error");
+    res.status(502).json({ connected: false, error: `ימות API connection test failed. Yemot says: ${reason}`, reason });
     return;
   } finally { token = ""; }
   if (verified) {
@@ -201,7 +216,7 @@ router.get("/admin/yemot/provider-directory", requireAuth, admin, wrap(async (re
     const response=await fetch("https://www.call2all.co.il/ym/api/GetIVR2Dir",{
       method:"POST",headers:{"Content-Type":"application/json"},
       body:JSON.stringify({token,path:requested}),
-      redirect:"error",cache:"no-store",signal:AbortSignal.timeout(12000)
+      redirect: "manual",cache:"no-store",signal:AbortSignal.timeout(12000)
     });
     if(!response.ok)throw Error("Provider unavailable");
     result=await response.json();
@@ -283,7 +298,7 @@ router.post("/admin/yemot/install-child",requireAuth,admin,wrap(async(req,res)=>
    const body=new URLSearchParams({token,...params});
    const r=await fetch("https://www.call2all.co.il/ym/api/"+action,{
     method:"POST",headers:{"Content-Type":"application/x-www-form-urlencoded","Accept":"application/json"},
-    body,redirect:"error",cache:"no-store",signal:AbortSignal.timeout(15000)
+    body,redirect: "manual",cache:"no-store",signal:AbortSignal.timeout(15000)
    });
    if(!r.ok)throw Error("Yemot "+action+" network or permission error");
    return await r.json() as any;
@@ -383,7 +398,7 @@ type ProviderText={responseStatus?:string;contents?:string;message?:string};
 async function yemotProviderCall(token:string,action:"GetTextFile"|"UpdateExtension",params:Record<string,string>){
  const response=await fetch("https://www.call2all.co.il/ym/api/"+action,{
   method:"POST",headers:{"Content-Type":"application/x-www-form-urlencoded","Accept":"application/json"},
-  body:new URLSearchParams({token,...params}),cache:"no-store",redirect:"error",
+  body:new URLSearchParams({token,...params}),cache:"no-store",redirect: "manual",
   signal:AbortSignal.timeout(18000)
  });
  if(!response.ok)throw Error("ימות provider request failed");
