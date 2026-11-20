@@ -14,9 +14,16 @@ export async function resolve(specifier, context, nextResolve) {
     (specifier.startsWith("./") || specifier.startsWith("../")) &&
     !/\.[a-zA-Z0-9]+$/.test(specifier)
   ) {
-    const candidate = fileURLToPath(new URL(specifier, context.parentURL)) + ".ts";
-    if (existsSync(candidate)) {
-      return { url: pathToFileURL(candidate).href, shortCircuit: true };
+    const base = fileURLToPath(new URL(specifier, context.parentURL));
+    const fileCandidate = base + ".ts";
+    if (existsSync(fileCandidate)) {
+      return { url: pathToFileURL(fileCandidate).href, shortCircuit: true };
+    }
+    // Directory import ("./schema" -> "./schema/index.ts"), used by
+    // @workspace/db and needed to import the IVR engine (phoneTree,
+    // menuPrompt) in tests. Node ESM does not resolve these on its own.
+    if (existsSync(base) && existsSync(base + "/index.ts")) {
+      return { url: pathToFileURL(base + "/index.ts").href, shortCircuit: true };
     }
   }
   return nextResolve(specifier, context);

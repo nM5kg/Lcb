@@ -49,6 +49,9 @@ test("remindTonight: 23:59 local (New York)", () => {
 test("formatSpokenDateTime spells out the time for TTS", () => {
   assert.equal(formatSpokenDateTime(new Date("2026-12-02T15:30:00-05:00"), TZ), "Wednesday, December 2, 2026 at 3 30 P M");
   assert.equal(formatSpokenDateTime(new Date("2026-12-02T00:05:00-05:00"), TZ), "Wednesday, December 2, 2026 at 12 05 A M");
+  // Day-name rule (Yakob 2026-11-20): Friday is the full phrase, Saturday is Motzei.
+  assert.equal(formatSpokenDateTime(new Date("2026-11-20T15:30:00-05:00"), TZ), "Friday Erev Shabbos Kodesh, November 20, 2026 at 3 30 P M");
+  assert.equal(formatSpokenDateTime(new Date("2026-11-21T20:00:00-05:00"), TZ), "Motzei Shabbos Kodesh, November 21, 2026 at 8 00 P M");
 });
 
 // --- numeric date resolution -------------------------------------------------
