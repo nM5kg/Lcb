@@ -20,7 +20,7 @@ import { Badge } from "@/components/ui/badge";
 import {
   Shield, Users, Flag, Megaphone, CheckCircle, Ban, Clock, Trash2, Edit3, BarChart3,
   TrendingUp, Heart, MessageSquare, Globe, Star, AlertTriangle, UserCheck, BookmarkCheck, UserPlus,
-  Lock, Sparkles, FolderKanban, HandHeart, ExternalLink, RotateCcw,
+  Lock, Sparkles, FolderKanban, HandHeart, ExternalLink, RotateCcw, Volume2,
 } from "lucide-react";
 import { formatGregorianDate } from "@/lib/gregorian-date";
 import { useToast } from "@/hooks/use-toast";
@@ -37,6 +37,7 @@ import { EngagementManagement } from "@/components/admin/engagement-management";
 import { PinnedAnnouncementManagement } from "@/components/admin/pinned-announcement-management";
 import { YemotCentralManagement } from "@/components/admin/yemot-central-management";
 import { YemotVoiceStudio } from "@/components/admin/yemot-voice-studio";
+import { AllRecordingsList } from "@/components/admin/all-recordings-list";
 
 function reportContentPath(type: string, id: number) {
   if (type === "news") return `/news/${id}`;
@@ -377,6 +378,9 @@ export default function FounderDashboard() {
             {user?.role === "super_admin" && (
               <TabsTrigger value="yemot-global" className="gap-2"><Globe className="h-4 w-4" /> ימות API — צענטראל</TabsTrigger>
             )}
+            {user?.role === "super_admin" && (
+              <TabsTrigger value="recordings" className="gap-2"><Volume2 className="h-4 w-4" /> אַלע רעקאָרדירונגען</TabsTrigger>
+            )}
             {(user?.role === "admin" || user?.role === "super_admin") && (
               <TabsTrigger value="member-management" className="gap-2">
                 <Users className="h-4 w-4" /> {yi ? "מעמבער־פארוואלטונג" : "Advanced Members"}
@@ -568,6 +572,9 @@ export default function FounderDashboard() {
           </TabsContent>
           {user?.role === "super_admin" && (
             <TabsContent value="yemot-global" className="space-y-6"><YemotCentralManagement /></TabsContent>
+          )}
+          {user?.role === "super_admin" && (
+            <TabsContent value="recordings" className="space-y-6"><AllRecordingsList /></TabsContent>
           )}
           <TabsContent value="welcome-pages" className="space-y-6">
             <MembershipGateManagement />
