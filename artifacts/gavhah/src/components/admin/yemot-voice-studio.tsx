@@ -93,13 +93,14 @@ export function YemotVoiceStudio(){
  const [monitor,setMonitor]=useState(false);
  const [message,setMessage]=useState("");
  const [error,setError]=useState("");
+ const [confirmPublish,setConfirmPublish]=useState(false);
  const recorder=useRef<MediaRecorder|null>(null);
  const stream=useRef<MediaStream|null>(null);
  const micMonitor=useRef<AudioContext|null>(null);
  const effectsRef=useRef(effects);
  useEffect(()=>{effectsRef.current=effects;},[effects]);
  const reload=async()=>{
-  const v=await req("") as StudioResponse;
+  const v=await req("?data=1") as StudioResponse;
   setData(v);return v;
  };
  useEffect(()=>{void reload().catch(e=>setError(e.message));return ()=>{
@@ -107,8 +108,8 @@ export function YemotVoiceStudio(){
   stream.current?.getTracks().forEach(t=>t.stop());
   if(micMonitor.current)void micMonitor.current.close();
  };},[]);
- useEffect(()=>{setRecording(null);setPreviewUrl("");setEffects(original);setError("");setMessage("");},[selected]);
- useEffect(()=>{const item=data?.prompts.find(x=>x.path===selected);setTts(item?.tts_text||"");},[selected,data?.prompts]);
+ useEffect(()=>{setRecording(null);setPreviewUrl("");setEffects(original);setError("");setMessage("");setConfirmPublish(false);},[selected]);
+ useEffect(()=>{const item=data?.prompts?.find(x=>x.path===selected);setTts(item?.tts_text||"");},[selected,data?.prompts]);
  useEffect(()=>{
   if(!recording){setPreviewUrl("");return;}
   const url=URL.createObjectURL(recording);setPreviewUrl(url);
@@ -116,7 +117,8 @@ export function YemotVoiceStudio(){
  },[recording]);
  const current=data?.catalogue.find(x=>x.path===selected);
  const saved=data?.prompts.find(x=>x.path===selected);
- const options=(data?.catalogue||[]).filter(x=>(x.path+" "+x.label).toLowerCase().includes(filter.toLowerCase()));
+ const promptOptions=(data?.prompts||[]).filter(p=>p.audio_size&&!(data?.catalogue||[]).some(x=>x.path===p.path)).map(p=>({path:p.path,label:"קול־פראַמפּט "+p.path,kind:"prompt",parent:p.path.replace(/[a-z]+$/,"")||"root",depth:0,capability:"navigation" as const,suggestedEnglish:""}));
+ const options=[...(data?.catalogue||[]),...promptOptions].filter(x=>(x.path+" "+x.label).toLowerCase().includes(filter.toLowerCase()));
  const family=(data?.catalogue||[]).filter(x=>x.parent===selected);
  const stopMonitor=()=>{
   if(micMonitor.current){void micMonitor.current.close();micMonitor.current=null;}
@@ -175,7 +177,8 @@ export function YemotVoiceStudio(){
   setMessage("געהיטן אלס פריוואטע טיוטע. יעצט דרוק פובליצירן צום ימות־פאלדער.");
  });
  const publish=()=>void work(async()=>{
-  if(!window.confirm("פובליצירן די איצטיגע רעקארדירונג צו ימות? קיין אנדערע עקסטענשאן ווערט נישט געטוישט."))return;
+  if(!confirmPublish){setConfirmPublish(true);setMessage("דרוק ווידער אויף „פובליצירן“ צו באַשטעטיקן דאָס פּובליצירן צו ימות. קיין אנדערע עקסטענשאן ווערט נישט געטוישט.");return;}
+  setConfirmPublish(false);
   const result=await req("/"+encodeURIComponent(selected)+"/publish",{
    method:"POST",body:JSON.stringify({confirm:"PUBLISH_TO_APPROVED_YEMOT_FOLDER"})
   });
@@ -219,7 +222,7 @@ export function YemotVoiceStudio(){
     {options.map(x=><option key={x.path} value={x.path}>{x.path==="root"?"/":"/"+x.path} — {x.label}</option>)}
     {!options.some(x=>x.path===selected)&&current&&<option value={selected}>{current.label}</option>}
    </select>
-   <p className="text-sm">אויסגעקליבן: <strong>{current?.label||"Main menu"}</strong> · <code dir="ltr">{selected==="root"?"/":"/"+selected}</code></p>
+   <p className="text-sm">אויסגעקליבן: <strong>{current?.label||saved?.path||"Main menu"}</strong> · <code dir="ltr">{selected==="root"?"/":"/"+selected}</code></p>
    <p className="text-xs">{current?.capability==="api_implemented_not_phone_verified"?"די API־פונקציע איז פארהאן אינעם קאוד; אן אמתער רוף־טעסט פעלט.":current?.capability==="roadmap_only"?"די פונקציע איז נאכנישט טעלעפאניש איינגעבויט — דערווייל בלויז אין מעניו־פלאן.":"דאס איז א מעניו־נאוויגאציע־שטאפל."}</p>
    <p className="text-xs text-muted-foreground">פון אלע טעלעפאן־קנעפלעך: {(data?.catalogue||[]).filter(x=>x.capability==="api_implemented_not_phone_verified").length} האבן שוין API־לאגיק; {(data?.catalogue||[]).filter(x=>x.capability==="roadmap_only").length} זענען נאך בלויז געפלאנט. דאס איז נישט קיין באשטעטיגונג פון עכטע טעלעפאן־טעסטס.</p>
    {family.length>0&&<div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
@@ -282,7 +285,7 @@ export function YemotVoiceStudio(){
      finally{setBusy(false);}
     })()}>▶️ טוישן קול און איבערהערן</Button>
     <Button disabled={busy||!recording} onClick={uploadAudio}>היטן אודיא־טיוטע</Button>
-    <Button disabled={busy||!saved?.audio_size||(data?.provider.state!=="live"||!/^\/[0-9]{1,3}$/.test(data.provider.approvedFolder||""))} variant="outline" onClick={publish}>פובליצירן צום ימות־האטליין</Button>
+    <Button disabled={busy||!saved?.audio_size||(data?.provider.state!=="live"||!/^\/[0-9]{1,3}$/.test(data.provider.approvedFolder||""))} variant="outline" onClick={publish}>{confirmPublish?"באַשטעטיקן — פּובליצירן צו ימות":"פובליצירן צום ימות־האטליין"}</Button>
     {saved?.published_path&&<Button disabled={busy} variant="outline" onClick={()=>void work(async()=>{
      if(!window.confirm("אויסלעשן די אוידיא פאר דעם מעניו און נוצן ווידער TTS? דער פייל ביי ימות בלייבט אפגעהיטן."))return;
      await req("/"+encodeURIComponent(selected)+"/published",{
