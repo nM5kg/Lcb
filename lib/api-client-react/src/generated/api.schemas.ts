@@ -92,6 +92,10 @@ export interface Discussion {
   createdAt: string;
   /** @nullable */
   updatedAt?: string | null;
+  // Hand-added 2026-11-20 to match lib/api-spec/openapi.yaml (orval regen
+  // is broken in this environment — see the spec for the source of truth).
+  /** @nullable */
+  recordingStatus?: string | null;
 }
 
 export type GroupPrivacy = typeof GroupPrivacy[keyof typeof GroupPrivacy];
@@ -198,6 +202,10 @@ export interface NewsArticle {
   viewCount?: number;
   likeCount?: number;
   createdAt: string;
+  // Hand-added 2026-11-20 to match lib/api-spec/openapi.yaml (orval regen
+  // is broken in this environment — see the spec for the source of truth).
+  /** @nullable */
+  recordingStatus?: string | null;
 }
 
 export interface NewsArticleInput {
