@@ -55,7 +55,7 @@ export async function fetchModeratedNewsAudio(path:string):Promise<Uint8Array>{
  try{
   const response=await fetch("https://www.call2all.co.il/ym/api/DownloadFile",{
     method:"POST",headers:{"Content-Type":"application/json"},
-    body:JSON.stringify({token,path}),redirect:"error",cache:"no-store",signal:AbortSignal.timeout(15000)
+    body:JSON.stringify({token,path}),redirect: "manual",cache:"no-store",signal:AbortSignal.timeout(15000)
   });
   const advertised=Number(response.headers.get("content-length")||0);
   if(!response.ok||(advertised>6*1024*1024))throw new Error("Recording not available");
@@ -66,6 +66,77 @@ export async function fetchModeratedNewsAudio(path:string):Promise<Uint8Array>{
 }
 
 
+// A NEW update inserted from the phone (Yakob 2026-11-20 04:46/04:54).
+// delivery_mode 'own_voice' = the caller's recording is played as-is
+// (after moderation); 'system_voice' = the system re-voices it (STT ->
+// Yiddish transcript -> pinchas TTS). The STT step is pending a service
+// decision, so a system-voice submission waits as pending_review until
+// the transcription pipeline exists. Same fingerprint/idempotency
+// pattern as saveVoiceNewsReply. delivery_mode has NO CHECK constraint
+// on gavhah_phone_news_submissions, so both values are accepted.
+export async function savePhoneNewsSubmission(client:PoolClient,deliveryMode:"own_voice"|"system_voice",userId:number,callHash:string,path:string){
+ const valid=validRecordedPath(path);
+ if(!valid)return {ok:false,info:"The recording was not accepted. Please try again."};
+ const fingerprint=createHash("sha256").update(callHash+"|new|"+deliveryMode+"|"+path).digest("hex");
+ const inserted=await client.query(
+  "INSERT INTO public.gavhah_phone_news_submissions(member_id,status,delivery_mode,call_hash,provider_recording_path,recording_fingerprint) "+
+  "VALUES($1,'pending_review',$2,$3,$4,$5) ON CONFLICT(recording_fingerprint) DO NOTHING RETURNING id",
+  [userId,deliveryMode,callHash,valid,fingerprint]);
+ return {ok:true,info:inserted.rowCount
+  ?(deliveryMode==="system_voice"
+   ?"Your update is saved and waiting for review. The system will voice it in its own voice after transcription."
+   :"Your update is saved and waiting for review. It will appear on the phone only after approval.")
+  :"This recording was already submitted for review."};
+}
+// A NEW discussion opened from the phone (Yakob 2026-11-20 04:54 rule 4):
+// recordings ONLY — no text, no system voice, no transcription. Creates
+// the discussion row (placeholder title, pending review) plus the voice
+// opening in BOTH voice tables (the message thread and the openings
+// record). The discussion number announced to the caller is the new
+// discussions id. The discussion row is created immediately with a
+// placeholder title while only the voice opening is pending review;
+// hiding it until approval would need a website change (a status on
+// discussions).
+export async function saveDiscussionVoiceOpening(client:PoolClient,userId:number,callHash:string,path:string){
+ const valid=validRecordedPath(path);
+ if(!valid)return {ok:false,info:"The recording was not accepted. Please try again."};
+ const member=await client.query<{name:string}>("SELECT name FROM public.users WHERE id=$1",[userId]);
+ const authorName=member.rows[0]?.name||"Phone member";
+ const fingerprint=createHash("sha256").update(callHash+"|discussion|"+path).digest("hex");
+ const disc=await client.query<{id:number}>(
+  "INSERT INTO public.discussions(title,content,category,author_id,author_name) "+
+  "VALUES($1,'','',$2,$3) RETURNING id",
+  ["Phone discussion — awaiting review",userId,authorName]);
+ const discussionId=disc.rows[0]?.id;
+ if(!discussionId)return {ok:false,info:"The discussion could not be created. Please try again."};
+ await client.query(
+  "INSERT INTO public.gavhah_discussion_voice_messages(discussion_id,member_id,message_type,provider_recording_path,source,fingerprint,review_status) "+
+  "VALUES($1,$2,'opening',$3,'phone',$4,'pending') ON CONFLICT(fingerprint) DO NOTHING",
+  [discussionId,userId,valid,fingerprint]);
+ const existingOpening=await client.query(
+  "SELECT discussion_id FROM public.gavhah_discussion_voice_openings WHERE discussion_id=$1",
+  [discussionId]);
+ if(existingOpening.rowCount===0){
+  await client.query(
+   "INSERT INTO public.gavhah_discussion_voice_openings(discussion_id,member_id,title_audio_path) "+
+   "VALUES($1,$2,$3)",
+   [discussionId,userId,valid]);
+ }
+ // The discussion CARRIES its recording (Yakob 2026-11-20): a post-audio
+ // row is attached now, pending review, so the website shows it and the
+ // hotline gate can pick it up once published. The recording itself lives
+ // on Yemot (the voice opening), not as DB bytes yet — byte_size 1 marks
+ // that (the table requires byte_size >= 1; audio_data stays empty until
+ // the approve step downloads the bytes); the approve step downloads the
+ // bytes from the opening and uploads them to Yemot /897 before publishing.
+ // review_status is 'pending_staff' — the table's pending value ('pending'
+ // is not allowed by its CHECK). Never a second row.
+ await client.query(
+  "INSERT INTO public.gavhah_post_audio(post_type,post_id,author_id,mime_type,audio_data,byte_size,delivery_mode,review_status,transcription_status) "+
+  "VALUES('discussion',$1,$2,'audio/wav',''::bytea,1,'original','pending_staff','not_needed') ON CONFLICT(post_type,post_id) DO NOTHING",
+  [discussionId,userId]);
+ return {ok:true,info:"Your discussion is saved as number "+discussionId+" and waiting for review. It will appear on the phone only after approval.",discussionId};
+}
 // Telephone save and report use the SAME canonical rows as website /saved
 // and /reports. Their state is per verified website-linked member.
 export async function phoneNewsSave(client:PoolClient,userId:number,newsId:number,desired:boolean){
@@ -83,25 +154,28 @@ export async function phoneNewsSave(client:PoolClient,userId:number,newsId:numbe
   [userId,newsId]);
  return "This update was removed from your website saved list.";
 }
-export async function phoneNewsReport(client:PoolClient,userId:number,newsId:number,reasonDigit:string){
+export async function phoneNewsReport(client:PoolClient,userId:number,contentId:number,reasonDigit:string,contentType:"news"|"discussion"="news"){
  const reasons:Record<string,string>={
   "1":"spam","2":"inappropriate","3":"misinformation","4":"harassment","5":"other"
  };
  const reason=reasons[reasonDigit];
  if(!reason)return "Invalid report reason. Please select one through five.";
- const exists=await client.query("SELECT id FROM public.news WHERE id=$1",[newsId]);
- if(!exists.rowCount)return "News update not found.";
+ // contentType is a fixed constant from the caller ('news' or
+ // 'discussion'), never user input — the table name is safe to inline.
+ const table=contentType==="discussion"?"public.discussions":"public.news";
+ const exists=await client.query("SELECT id FROM "+table+" WHERE id=$1",[contentId]);
+ if(!exists.rowCount)return contentType==="discussion"?"Discussion not found.":"News update not found.";
  // Same-site one-pending-report-per-member rule; rate limit also prevents
  // serial anonymous misuse across news records. Caller is web-code verified.
  const repeated=await client.query(
-  "SELECT id FROM public.reports WHERE content_type='news' AND content_id=$1 "+
-  "AND reporter_id=$2 AND status='pending' LIMIT 1",[newsId,userId]);
- if(repeated.rowCount)return "You already have a pending report on this update.";
+  "SELECT id FROM public.reports WHERE content_type=$1 AND content_id=$2 "+
+  "AND reporter_id=$3 AND status='pending' LIMIT 1",[contentType,contentId,userId]);
+ if(repeated.rowCount)return "You already have a pending report on this "+(contentType==="discussion"?"discussion.":"update.");
  const volume=await client.query<{total:string}>(
   "SELECT COUNT(*)::text AS total FROM public.reports WHERE reporter_id=$1 AND created_at>now()-interval '1 hour'",[userId]);
  if(Number(volume.rows[0]?.total||0)>=5)return "Report limit reached. Please try again later.";
  await client.query(
   "INSERT INTO public.reports(content_type,content_id,reason,description,reporter_id,status) "+
-  "VALUES('news',$1,$2,NULL,$3,'pending')",[newsId,reason,userId]);
+  "VALUES($1,$2,$3,NULL,$4,'pending')",[contentType,contentId,reason,userId]);
  return "Your report has been saved to the same website administration review queue.";
 }

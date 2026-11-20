@@ -76,12 +76,18 @@ const scalar=async(client:PoolClient,query:string,args:unknown[])=> (await clien
  * scheduled/unpublished charity or non-public member data can be exposed.
  * IDs never bypass moderation, and no payment or membership is created.
  */
-export const publicIdSections=new Set(["155","166","167","173","1831","1832","1833","1834"]);
+export const publicIdSections=new Set(["155","166","167","173","1831","1832","1833","1834","971901","971902","971903","971904"]);
 // The search menu is an alias to the same approved public queries, not a
 // separate database view. One consistent privacy rule applies everywhere.
+// TRUE MENU (live v117): Search is root 11 -> path 97190, and 11 -> 4 (not
+// 11 -> 5) is the minyan lookup. So 971901-971904 alias to the same four
+// public sections as the old 1831-1834 aliases; 971905 (account search) is
+// a tree leaf ("use the website search page"), not a public-by-id path.
 const canonicalPublicIdPath=(path:string)=>({
- "1831":"155","1832":"166","1833":"167","1834":"173"
+ "1831":"155","1832":"166","1833":"167","1834":"173",
+ "971901":"155","971902":"166","971903":"167","971904":"173"
 } as Record<string,string>)[path]||path;
+export {canonicalPublicIdPath};
 export async function readPhonePublicById(
  client:PoolClient,path:string,id:number,part:number
 ):Promise<{text:string;hasMore:boolean}>{
