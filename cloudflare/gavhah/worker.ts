@@ -8,8 +8,36 @@ import {httpServerHandler} from "cloudflare:node";
 import app from "../../artifacts/api-server/src/app-cloudflare";
 import {inlineAssets} from "./generated-static-assets";
 
-app.listen(8787);
 const api=httpServerHandler({port:8787});
+// Start the Express server at module load (as before) and let API requests
+// wait until it is listening. Starting it lazily inside fetch made some
+// fresh isolates answer with a dropped connection: the runtime cancels a
+// request in milliseconds when the local Node server it is forwarded to is
+// not yet up, which surfaced as "Connection error" / 1101 in the browser.
+const listeningPromise: Promise<void> = new Promise<void>((resolve, reject) => {
+  try {
+    const server = app.listen(8787, () => resolve());
+    server.on("error", reject);
+  } catch (err) {
+    reject(err);
+  }
+});
+function ensureListening(): Promise<void> {
+  return listeningPromise;
+}
+async function withTimeout<T>(promise: Promise<T>, ms: number, message: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => reject(new Error(message)), ms);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
 const mimeCache="public, max-age=600";
 function nativeReadiness(env:Record<string,unknown>){
  const dbUrl=String(env.DATABASE_URL||"");
@@ -69,7 +97,24 @@ export default {
    if(path.startsWith("/api/admin/hotline-migration")&&
     !["GET","HEAD","OPTIONS"].includes(request.method))
     return paused("Shared live phone-provider administration is locked on the independent Cloudflare copy.",403);
-   return api.fetch(request,env,ctx);
+   // Never let an API request die with a dropped connection: wait until the
+   // Node server is listening, and answer every failure as JSON so the
+   // frontend can retry instead of showing a generic connection error.
+   try {
+    await withTimeout(ensureListening(), 8000, "Server startup timed out");
+    // Safety net: if the Node server ever truly stalls, answer JSON 503
+    // after 25s (which the frontend retries) instead of letting the runtime
+    // cancel the request as a "hung" 1101. A pending timer also keeps the
+    // request's event loop alive while the server works.
+    const guard = new Promise<Response>((resolve) => {
+      setTimeout(() => resolve(Response.json({error:"Service temporarily unavailable. Please try again."},{status:503,headers:{"Cache-Control":"no-store"}})), 25_000);
+    });
+    const res = await Promise.race([api.fetch(request,env,ctx), guard]);
+    return res;
+   } catch (err) {
+    console.error("Gavhah Cloudflare API", "API proxy failed", err instanceof Error ? err.message : "error");
+    return Response.json({error:"Service temporarily unavailable. Please try again."},{status:503,headers:{"Cache-Control":"no-store"}});
+   }
   }
   if(request.method!=="GET"&&request.method!=="HEAD")
    return new Response("Method not allowed",{status:405,headers:{Allow:"GET, HEAD"}});

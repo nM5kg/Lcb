@@ -1,12 +1,1 @@
-{
-  "$schema": "https://unpkg.com/wrangler/config-schema.json",
-  "name": "gavhah-cloudflare-native",
-  "main": "./worker.ts",
-  "compatibility_date": "2026-10-26",
-  "compatibility_flags": ["nodejs_compat"],
-  "workers_dev": false,
-  "vars": {
-    "NODE_ENV": "production",
-    "CF_WORKER_RUNTIME": "1"
-  }
-}
+{"$schema":"https://unpkg.com/wrangler/config-schema.json","compatibility_date":"2026-10-26","compatibility_flags":["nodejs_compat"],"main":"./worker.ts","name":"gavhah-cloudflare-native","vars":{"CF_PHONE_WEBHOOKS_ENABLED":"true","CF_WORKER_RUNTIME":"1","CF_YEMOT_WEBHOOKS_ENABLED":"true","NODE_ENV":"production","SESSION_COOKIE_SECURE":"true","SESSION_STORE":"postgres"},"workers_dev":true}
