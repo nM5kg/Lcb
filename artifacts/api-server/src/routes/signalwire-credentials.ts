@@ -119,7 +119,7 @@ router.post("/test",async(_req,res,next)=>{
     row.project_id+"/IncomingPhoneNumbers?PageSize=1";
    const auth="Basic "+Buffer.from(row.project_id+":"+token,"utf8").toString("base64");
    const response=await fetch(endpoint,{method:"GET",headers:{Authorization:auth,Accept:"application/json"},
-    redirect:"error",cache:"no-store",signal:AbortSignal.timeout(12000)});
+    redirect: "manual",cache:"no-store",signal:AbortSignal.timeout(12000)});
    if(!response.ok)throw Error("SignalWire token authentication or Numbers scope failed");
    const data:any=await response.json();
    if(!Array.isArray(data?.incoming_phone_numbers))throw Error("SignalWire returned unexpected response");
@@ -151,7 +151,7 @@ export async function readSignalWireInventory(){
   row.project_id+"/IncomingPhoneNumbers?PageSize=1000";
  const auth="Basic "+Buffer.from(row.project_id+":"+token,"utf8").toString("base64");
  const response=await fetch(url,{method:"GET",headers:{Authorization:auth,Accept:"application/json"},
-  redirect:"error",cache:"no-store",signal:AbortSignal.timeout(15000)});
+  redirect: "manual",cache:"no-store",signal:AbortSignal.timeout(15000)});
  if(!response.ok)throw Error("SignalWire numbers inventory unavailable; no provider settings changed");
  const data:unknown=await response.json();
  if(!data||typeof data!=="object"||!Array.isArray((data as any).incoming_phone_numbers))

@@ -12,7 +12,7 @@ import {sharedVoiceChangerBrowserSource} from "./voice-changer-browser";
 // the root extension, switch numbers, or use SignalWire for this feature.
 const router=Router();
 const dbTable="public.gavhah_yemot_voice_prompts";
-const safePath=(x:string)=>x==="root"||/^[1-9][0-9]{0,15}$/.test(x);
+export const safePath=(x:string)=>x==="root"||/^[1-9][0-9]{0,15}[a-z]?$/.test(x);
 const problem=(res:Response,code:number,error:string)=>res.status(code).json({error});
 const sameOrigin=(req:Request)=>{
  const origin=req.get("origin");
@@ -51,6 +51,26 @@ function catalogue(){
  const nDigits:Record<string,string>={"111":"4","113":"1","114":"2","115":"3"};
  for(const item of items){if(nDigits[item.path]){item.parent="97111";item.depth=4;item.displayDigit=nDigits[item.path];item.label=nDigits[item.path]+" — "+item.label;}}
  items.push({path:"97111",label:"1 — Other news options",kind:"menu",depth:3,parent:"11",displayDigit:"1"});
+ // Virtual menus reached by direct numbers (11–15, 77), not by phoneTree
+ // digits. They have Yiddish prompts and must be editable in the studio.
+ const virtualMenus:[string,string,string,string][]=[
+  ["97181","2 — Notifications options","menu","12"],
+  ["971811","1 — Unread notifications","button","97181"],
+  ["971812","2 — All notifications","button","97181"],
+  ["971813","3 — Mark all notifications read","button","97181"],
+  ["971814","4 — Notifications by type","button","97181"],
+  ["97190","1 — Search options","menu","11"],
+  ["97193","3 — My connections options","menu","13"],
+  ["9777","77 — More departments","menu","root"],
+ ];
+ for(const [path,label,kind,parent] of virtualMenus)
+  if(!items.some(x=>x.path===path))items.push({path,label,kind,depth:path.length,parent});
+ // Virtual gate (path 120): the login gate is reached by the engine, not
+ // by phoneTree digits, so it needs a catalogue entry of its own — without
+ // it knownPath("120")/knownPath("120a") fail and no gate recording can
+ // ever be published via the studio. The gate prompts are recorded in
+ // pinchas under keys 120a–120j (see true-menu.ts gateAudioKeyForState).
+ items.push({path:"120",label:"Login gate — member password / member ID",kind:"menu",depth:3,parent:"root"});
  // Implementation != verified phone functionality: label honestly.
  const known=new Set([...sectionPaths,"155","166","167","173","111","1121","1122","1123","1124","1125","1126","1127","1128","1129","113","114","115","121","122","123","124","125","126","185"]);
  items.push(...Object.entries(gavhahPhoneStageVoices).map(([path,item])=>({path,label:item.label,kind:"button",depth:4,parent:path.slice(0,3)})));
@@ -60,7 +80,15 @@ function catalogue(){
   capability:item.kind==="menu"?"navigation":
   known.has(item.path)?"api_implemented_not_phone_verified":"roadmap_only"}));
 }
-function knownPath(input:string){return catalogue().some(x=>x.path===input);}
+export function knownPath(input:string){
+ const paths=new Set(catalogue().map(x=>x.path));
+ if(paths.has(input))return true;
+ // Voice-prompt keys (1591a … 1592v) are not tree paths: accept a suffixed
+ // key when its unsuffixed base is a known path (1591, 1592). Without
+ // this, no Tishl/Calling draft could ever be published via the studio.
+ const m=/^([1-9][0-9]{0,15})([a-z])$/.exec(input);
+ return !!m&&paths.has(m[1]);
+}
 function getName(req:Request){return String(req.params.path||"");}
 function checkAudio(bytes:Buffer,mime:string){
  if(bytes.length<80||bytes.length>4*1024*1024)return false;
@@ -84,7 +112,7 @@ router.get("/admin/yemot/voice-studio",requireAuth,admin,wrap(async(_req,res)=>{
   return;
  }
  const [prompts,installation,voiceFolder]=await Promise.all([
-  pool.query("SELECT path,tts_text,tts_muted,mime_type,octet_length(audio_data) AS audio_size,published_path,published_at,updated_at FROM "+dbTable+" ORDER BY path"),
+  pool.query("SELECT path,tts_text,tts_muted,mime_type,octet_length(audio_data) AS audio_size,published_path,published_at,updated_at,yiddish_text,voice,language,audio_version,previous_audio_version,pending_regeneration,pending_voice FROM "+dbTable+" ORDER BY path"),
   pool.query("SELECT state,target_path,provider_summary->>'apiEndpoint' AS recorded_endpoint,provider_summary #>> '{campaign4444,state}' AS campaign_state FROM public.gavhah_yemot_ivr_install WHERE id=1"),
   pool.query("SELECT media_folder FROM public.gavhah_yemot_voice_storage WHERE id=1")
  ]);
@@ -99,7 +127,7 @@ router.get("/admin/yemot/voice-studio",requireAuth,admin,wrap(async(_req,res)=>{
   provider: {state:installation.rows[0]?.state||"not_configured",
     approvedFolder:voiceFolder.rows[0]?.media_folder||null,
     recordedCallback:installation.rows[0]?.recorded_endpoint||null,
-    cloudflareCallback:"https://gavhah-cloudflare-native.keygovhh.workers.dev/api/yemot/ivr",
+    cloudflareCallback:"https://"+(_req.get("x-forwarded-host")||_req.get("host")||"gavhah-cloudflare-native.gavhah-copy.workers.dev")+"/api/yemot/ivr",
     providerRouteVerifiedLive:false},
   note:"Draft audio is private. Only a manually published and verified file is offered to the existing Yemot IVR. No phone number, root menu, or SignalWire configuration is changed."});
 }));
@@ -135,6 +163,129 @@ router.put("/admin/yemot/voice-studio/:path/tts-muted",requireAuth,admin,wrap(as
  await pool.query("INSERT INTO "+dbTable+"(path,tts_muted) VALUES($1,$2) ON CONFLICT(path) DO UPDATE SET tts_muted=EXCLUDED.tts_muted,updated_at=now()",[path,req.body.muted]);
  res.json({ok:true,ttsMuted:req.body.muted,recordingsUnchanged:true});
 }));
+// Yiddish menus: per-button Yiddish text, voice and language.
+// Voices from GET https://yiddish.tools/api/v1/voices (2026-11-16): 19 built-in.
+const YIDDISH_VOICES=["pinchas","rochel","nachman","gitty","shimi","blimy","berel","moishy","hershel","leiby","shloimy","zalmen","avrumi","yanky","mottel","duvid","lipa","reuven","itzik"];
+const isYiddishVoice=(v:string)=>YIDDISH_VOICES.includes(v);
+const yiddishToolsHeaders=()=>({
+ "Authorization":"Bearer "+(process.env.YIDDISH_TOOLS_API_KEY||""),
+ "User-Agent":"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"});
+// Store a new draft audio version; the previous draft is kept for rollback.
+async function storeNewDraftVersion(path:string,bytes:Buffer,mime:string,voice:string):Promise<number>{
+ const current=(await pool.query("SELECT audio_data,mime_type,audio_version,voice FROM "+dbTable+" WHERE path=$1",[path])).rows[0];
+ const q=await pool.query("INSERT INTO "+dbTable+"(path,audio_data,mime_type,voice,audio_version,pending_regeneration,pending_voice) VALUES($1,$2,$3,$4,1,false,NULL) "+
+  "ON CONFLICT(path) DO UPDATE SET audio_data=EXCLUDED.audio_data,mime_type=EXCLUDED.mime_type,voice=EXCLUDED.voice,audio_version="+dbTable+".audio_version+1,pending_regeneration=false,pending_voice=NULL,updated_at=now() RETURNING audio_version",
+  [path,bytes,mime,voice]);
+ if(current?.audio_data){
+  await pool.query("UPDATE "+dbTable+" SET previous_audio_data=$2,previous_mime_type=$3,previous_audio_version=$4,previous_voice=$5 WHERE path=$1",
+   [path,current.audio_data,current.mime_type,current.audio_version,current.voice||"pinchas"]);
+ }
+ return Number(q.rows[0]?.audio_version||1);
+}
+// Edit the Yiddish text of this button's phrase (Hebrew allowed).
+router.put("/admin/yemot/voice-studio/:path/yiddish",requireAuth,admin,wrap(async(req,res)=>{
+ const path=getName(req);
+ if(!safePath(path)||!knownPath(path)){problem(res,400,"Unknown telephone menu path");return;}
+ const phrase=req.body?.yiddishText;
+ if(typeof phrase!=="string"||phrase.length>950||
+  /[\u0000-\u0008\u000b\u000c\u000e-\u001f]/.test(phrase)){
+  problem(res,400,"Yiddish text must contain at most 950 characters");return;
+ }
+ const normalized=phrase.replace(/\s+/g," ").trim();
+ await pool.query("INSERT INTO "+dbTable+"(path,yiddish_text) VALUES($1,$2) ON CONFLICT(path) DO UPDATE SET yiddish_text=EXCLUDED.yiddish_text,updated_at=now()",
+  [path,normalized]);
+ res.json({ok:true,path,yiddishText:normalized});
+}));
+// Switch this button between Yiddish audio and English TTS.
+router.post("/admin/yemot/voice-studio/:path/language",requireAuth,admin,wrap(async(req,res)=>{
+ const path=getName(req);
+ if(!safePath(path)||!knownPath(path)){problem(res,400,"Unknown telephone menu path");return;}
+ const language=String(req.body?.language||"");
+ if(req.body?.confirm!=="SET_MENU_LANGUAGE"||(language!=="yi"&&language!=="en")){
+  problem(res,400,"Confirm language switch (yi or en)");return;
+ }
+ await pool.query("INSERT INTO "+dbTable+"(path,language) VALUES($1,$2) ON CONFLICT(path) DO UPDATE SET language=EXCLUDED.language,updated_at=now()",
+  [path,language]);
+ res.json({ok:true,path,language});
+}));
+// Change the voice for this button: regenerate its Yiddish audio.
+// With YIDDISH_TOOLS_API_KEY set on the Worker, a generation is created and
+// the UI polls it. Without the key the request is queued (pending) and a
+// sync process generates the audio; the old audio stays live until the admin
+// publishes the new version.
+router.post("/admin/yemot/voice-studio/:path/regenerate",requireAuth,admin,wrap(async(req,res)=>{
+ const path=getName(req);
+ if(!safePath(path)||!knownPath(path)){problem(res,400,"Unknown telephone menu path");return;}
+ const voice=String(req.body?.voice||"pinchas").trim();
+ if(req.body?.confirm!=="REGENERATE_YIDDISH_AUDIO"||!isYiddishVoice(voice)){
+  problem(res,400,"Confirm regeneration with a valid Yiddish Tools voice");return;
+ }
+ const row=(await pool.query("SELECT yiddish_text FROM "+dbTable+" WHERE path=$1",[path])).rows[0];
+ const text=String(row?.yiddish_text||"").trim();
+ if(!text){problem(res,409,"Save a Yiddish text for this button first");return;}
+ const key=process.env.YIDDISH_TOOLS_API_KEY||"";
+ if(!key){
+  await pool.query("INSERT INTO "+dbTable+"(path,pending_regeneration,pending_voice) VALUES($1,true,$2) ON CONFLICT(path) DO UPDATE SET pending_regeneration=true,pending_voice=EXCLUDED.pending_voice,updated_at=now()",
+   [path,voice]);
+  res.json({ok:true,queued:true,voice,needsApiKey:true,note:"Regeneration queued. A sync process generates the new audio; the old audio stays live until the admin publishes the new version."});
+  return;
+ }
+ const form=new URLSearchParams({text,voice});
+ const created=await fetch("https://yiddish.tools/api/v1/speech",{method:"POST",
+  headers:{...yiddishToolsHeaders(),"Content-Type":"application/x-www-form-urlencoded"},
+  body:form,redirect: "manual",cache:"no-store",signal:AbortSignal.timeout(20000)});
+ if(!created.ok){problem(res,502,"Yiddish Tools did not accept the regeneration");return;}
+ const payload=await created.json() as {data?:{id?:string}};
+ const generationId=String(payload?.data?.id||"");
+ if(!/^[A-Za-z0-9_-]{8,64}$/.test(generationId)){problem(res,502,"Yiddish Tools returned no generation id");return;}
+ res.json({ok:true,queued:false,generationId,status:"pending",voice,
+  pollUrl:"/api/admin/yemot/voice-studio/"+encodeURIComponent(path)+"/regeneration/"+generationId});
+}));
+// Poll a Yiddish Tools generation; when completed, store it as the new draft
+// version (old audio kept for rollback) and clear the pending flag.
+router.get("/admin/yemot/voice-studio/:path/regeneration/:generationId",requireAuth,admin,wrap(async(req,res)=>{
+ const path=getName(req);
+ if(!safePath(path)||!knownPath(path)){problem(res,400,"Unknown telephone menu path");return;}
+ const generationId=String(req.params.generationId||"");
+ if(!/^[A-Za-z0-9_-]{8,64}$/.test(generationId)){problem(res,400,"Invalid generation id");return;}
+ const key=process.env.YIDDISH_TOOLS_API_KEY||"";
+ if(!key){problem(res,409,"Yiddish Tools API key is not configured on this Worker");return;}
+ const voice=String((await pool.query("SELECT pending_voice,voice FROM "+dbTable+" WHERE path=$1",[path])).rows[0]?.pending_voice||"pinchas");
+ const checked=await fetch("https://yiddish.tools/api/v1/generations/"+generationId,{headers:yiddishToolsHeaders(),redirect: "manual",cache:"no-store",signal:AbortSignal.timeout(20000)});
+ if(!checked.ok){problem(res,502,"Could not check the generation");return;}
+ const gen=await checked.json() as {data?:{status?:string;files?:{audio?:string};credits_used?:number;error?:string}};
+ const state=String(gen?.data?.status||"");
+ if(state==="completed"){
+  const audioUrl=String(gen?.data?.files?.audio||"");
+  if(!audioUrl){problem(res,502,"Generation completed without an audio file");return;}
+  const audio=await fetch(audioUrl,{headers:yiddishToolsHeaders(),redirect: "manual",cache:"no-store",signal:AbortSignal.timeout(30000)});
+  if(!audio.ok){problem(res,502,"Could not download the generated audio");return;}
+  const bytes=Buffer.from(await audio.arrayBuffer());
+  if(bytes.length<80||bytes.length>4*1024*1024){problem(res,502,"Generated audio has an unexpected size");return;}
+  const version=await storeNewDraftVersion(path,bytes,"audio/mpeg",voice);
+  res.json({ok:true,stored:true,audioVersion:version,voice,creditsUsed:gen?.data?.credits_used??null});
+  return;
+ }
+ if(state==="failed"||state==="error"){res.json({ok:false,status:state,error:gen?.data?.error||"Generation failed"});return;}
+ res.json({ok:true,status:"processing"});
+}));
+// Restore the previous draft audio version (rollback).
+router.post("/admin/yemot/voice-studio/:path/rollback",requireAuth,admin,wrap(async(req,res)=>{
+ const path=getName(req);
+ if(!safePath(path)||!knownPath(path)){problem(res,400,"Unknown telephone menu path");return;}
+ if(req.body?.confirm!=="ROLLBACK_YIDDISH_AUDIO"){problem(res,400,"Confirm rollback");return;}
+ const r=await pool.query("UPDATE "+dbTable+" SET audio_data=previous_audio_data,mime_type=previous_mime_type,audio_version=previous_audio_version,voice=previous_voice,previous_audio_data=NULL,previous_mime_type=NULL,previous_audio_version=NULL,previous_voice=NULL,pending_regeneration=false,pending_voice=NULL,updated_at=now() WHERE path=$1 AND previous_audio_data IS NOT NULL RETURNING path,audio_version",[path]);
+ if(!r.rowCount){problem(res,404,"No previous audio to roll back to");return;}
+ res.json({ok:true,rolledBack:true,audioVersion:r.rows[0].audio_version});
+}));
+// Delete the Yiddish phrase and its audio for this button (English TTS stays).
+router.delete("/admin/yemot/voice-studio/:path/phrase",requireAuth,admin,wrap(async(req,res)=>{
+ const path=getName(req);
+ if(!safePath(path)||!knownPath(path)){problem(res,400,"Unknown telephone menu path");return;}
+ if(req.body?.confirm!=="DELETE_YIDDISH_PHRASE"){problem(res,400,"Confirm Yiddish phrase deletion");return;}
+ await pool.query("UPDATE "+dbTable+" SET yiddish_text='',audio_data=NULL,mime_type=NULL,published_path=NULL,published_at=NULL,voice='pinchas',language='en',audio_version=1,previous_audio_data=NULL,previous_mime_type=NULL,previous_audio_version=NULL,previous_voice=NULL,pending_regeneration=false,pending_voice=NULL,updated_at=now() WHERE path=$1",[path]);
+ res.json({ok:true,deleted:true,language:"en"});
+}));
 router.post("/admin/yemot/voice-studio/:path/audio",requireAuth,admin,wrap(async(req,res)=>{
  const path=getName(req);
  if(!safePath(path)||!knownPath(path)){problem(res,400,"Unknown menu path");return;}
@@ -145,12 +296,13 @@ router.post("/admin/yemot/voice-studio/:path/audio",requireAuth,admin,wrap(async
  }
  const bytes=Buffer.from(encoded,"base64");
  if(!checkAudio(bytes,mime)){problem(res,415,"Unsupported audio format or invalid audio signature");return;}
- // Replace draft only. A previously published file remains audible until
- // the owner explicitly publishes a replacement with a new, unique filename.
- const q=await pool.query("INSERT INTO "+dbTable+"(path,audio_data,mime_type) VALUES($1,$2,$3) "+
- "ON CONFLICT(path) DO UPDATE SET audio_data=EXCLUDED.audio_data,mime_type=EXCLUDED.mime_type,updated_at=now() "+
- "RETURNING path,octet_length(audio_data) AS size",[path,bytes,mime]);
- res.json({ok:true,audioSize:q.rows[0].size,live:false,needsPublish:true});
+ // Replace draft only, as a new version; the previous draft is kept for
+ // rollback. A previously published file remains audible until the owner
+ // explicitly publishes a replacement with a new, unique filename.
+ const currentVoice=String((await pool.query("SELECT voice FROM "+dbTable+" WHERE path=$1",[path])).rows[0]?.voice||"pinchas");
+ const version=await storeNewDraftVersion(path,bytes,mime,currentVoice);
+ const q=await pool.query("SELECT octet_length(audio_data) AS size FROM "+dbTable+" WHERE path=$1",[path]);
+ res.json({ok:true,audioSize:q.rows[0].size,live:false,needsPublish:true,audioVersion:version});
 }));
 router.get("/admin/yemot/voice-studio/:path/audio",requireAuth,admin,wrap(async(req,res)=>{
  const path=getName(req);
@@ -175,7 +327,7 @@ const providerRequest=async(token:string,operation:string,values:Record<string,s
  const body=new URLSearchParams({token,...values});
  const response=await fetch("https://www.call2all.co.il/ym/api/"+operation,{
   method:"POST",headers:{"Content-Type":"application/x-www-form-urlencoded"},
-  body,redirect:"error",cache:"no-store",signal:AbortSignal.timeout(20000)
+  body,redirect: "manual",cache:"no-store",signal:AbortSignal.timeout(20000)
  });
  if(!response.ok)throw Error("Yemot API unavailable");
  const result=await response.json() as {responseStatus?:string;files?:unknown[];dirs?:unknown[];fileExists?:boolean};
@@ -277,7 +429,7 @@ router.post("/admin/yemot/voice-studio/:path/publish",requireAuth,admin,wrap(asy
  form.set("convertAudio","1");form.set("autoNumbering","false");form.set("tts","0");
  form.set("qqfile",new Blob([new Uint8Array(asset.audio_data)],{type:asset.mime_type}),file);
  const up=await fetch("https://www.call2all.co.il/ym/api/UploadFile",{
-  method:"POST",body:form,redirect:"error",cache:"no-store",signal:AbortSignal.timeout(45000)
+  method:"POST",body:form,redirect: "manual",cache:"no-store",signal:AbortSignal.timeout(45000)
  });
  if(!up.ok)throw Error("Yemot media upload failed");
  const result=await up.json() as {responseStatus?:string};
@@ -338,17 +490,25 @@ router.post("/admin/yemot/voice-studio/:path/delete-published",requireAuth,admin
    error:"The active recording was disabled, but deleting the provider file could not be verified. The extension and other recordings were not touched."});
  }
 }));
-export async function phonePromptOverride(path:string):Promise<{ttsText:string|null;audioPath:string|null;ttsMuted:boolean}>{
+export async function phonePromptOverride(path:string):Promise<{ttsText:string|null;audioPath:string|null;ttsMuted:boolean;yiddishText:string|null}>{
  const key=path||"root";
- if(!safePath(key))return {ttsText:null,audioPath:null,ttsMuted:false};
+ if(!safePath(key))return {ttsText:null,audioPath:null,ttsMuted:false,yiddishText:null};
  try{
-  const q=await pool.query("SELECT tts_text,tts_muted,published_path FROM "+dbTable+" WHERE path=$1",[key]);
+  const q=await pool.query("SELECT tts_text,tts_muted,published_path,language,yiddish_text FROM "+dbTable+" WHERE path=$1",[key]);
   const row=q.rows[0];
   const audioPath=String(row?.published_path||"");
+  // A button switched to English plays no Yiddish recording (TTS fallback).
+  const yiddish=row?.language!=="en";
+  // Yiddish TEXT is NEVER spoken as TTS (English-default rule, Yakob
+  // 2026-11-19 23:41): it is the recording's text only. The caller in
+  // yemot-api-driven-phone uses ttsText (English) or audioPath (published
+  // pinchas recording) and never yiddishText. The field is still
+  // returned so the studio UI can show the recording's text.
   return {ttsText:typeof row?.tts_text==="string"&&row.tts_text.trim()?row.tts_text:null,ttsMuted:row?.tts_muted===true,
-   audioPath:/^ivr2:\/[0-9]{1,3}\/gavhah_[a-f0-9]{32}\.wav$/.test(audioPath)?audioPath:null};
+   audioPath:yiddish&&/^ivr2:\/[0-9]{1,3}\/gavhah_[a-f0-9]{32}\.wav$/.test(audioPath)?audioPath:null,
+   yiddishText:yiddish&&typeof row?.yiddish_text==="string"&&row.yiddish_text.trim()?row.yiddish_text.trim():null};
  }catch(e){
-  if((e as {code?:string})?.code==="42P01")return {ttsText:null,audioPath:null,ttsMuted:false};
+  if((e as {code?:string})?.code==="42P01")return {ttsText:null,audioPath:null,ttsMuted:false,yiddishText:null};
   throw e;
  }
 }

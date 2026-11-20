@@ -12,13 +12,16 @@ const urlSign=(path:string,version:string)=>{
  if(secret.length<24)throw Error("SignalWire voice signing key unavailable");
  return createHmac("sha256",secret).update("gavhah-olam-public-menu-audio-v1:"+path+":"+version).digest("hex");
 };
-export async function olamMenuAudioUrl(path:string):Promise<string|null>{
+export async function olamMenuAudioUrl(path:string,baseUrl?:string):Promise<string|null>{
  if(!validPath(path))return null;
- const data=await pool.query<{audio_version:string}>(
-  "SELECT audio_version::text AS audio_version FROM "+table+" WHERE path=$1 AND is_active=true AND audio_data IS NOT NULL",[path]);
- const version=data.rows[0]?.audio_version;
- if(!version)return null;
- return root+"/api/signalwire/olam-voice/"+encodeURIComponent(path)+"/"+version+"?sig="+urlSign(path,version);
+ const data=await pool.query<{audio_version:string;language:string}>(
+  "SELECT audio_version::text AS audio_version,language FROM "+table+" WHERE path=$1 AND is_active=true AND audio_data IS NOT NULL",[path]);
+ const row=data.rows[0];
+ if(!row?.audio_version)return null;
+ // A button switched to English plays no Yiddish recording (TTS fallback).
+ if(row.language&&row.language!=="yi")return null;
+ const base=(baseUrl||"").replace(/\/+$/,"")||root;
+ return base+"/api/signalwire/olam-voice/"+encodeURIComponent(path)+"/"+row.audio_version+"?sig="+urlSign(path,row.audio_version);
 }
 async function requireVoiceAdmin(req:Request,res:Response,next:NextFunction){
  try{
@@ -44,8 +47,11 @@ function wrap(f:(req:Request,res:Response)=>Promise<void>){
 }
 router.get("/admin/max/ivr-editor/voice-audio/:path",requireVoiceAdmin,wrap(async(req,res)=>{
  if(!check(req,res))return;
- const row=(await pool.query("SELECT octet_length(audio_data) AS size,is_active,updated_at FROM "+table+" WHERE path=$1",[req.params.path])).rows[0];
- res.json({hasAudio:!!row?.size,isActive:!!row?.is_active,size:row?.size||0,updatedAt:row?.updated_at||null});
+ const row=(await pool.query("SELECT octet_length(audio_data) AS size,is_active,updated_at,audio_version,voice,language,previous_audio_version,pending_regeneration,pending_voice FROM "+table+" WHERE path=$1",[req.params.path])).rows[0];
+ res.json({hasAudio:!!row?.size,isActive:!!row?.is_active,size:row?.size||0,updatedAt:row?.updated_at||null,
+  audioVersion:row?.audio_version||0,voice:row?.voice||"pinchas",language:row?.language||"yi",
+  previousAudioVersion:row?.previous_audio_version||null,
+  pendingRegeneration:!!row?.pending_regeneration,pendingVoice:row?.pending_voice||null});
 }));
 router.get("/admin/max/ivr-editor/voice-audio/:path/file",requireVoiceAdmin,wrap(async(req,res)=>{
  if(!check(req,res))return;
@@ -61,8 +67,47 @@ router.post("/admin/max/ivr-editor/voice-audio/:path",requireVoiceAdmin,wrap(asy
  if(buffer.length<46||buffer.length>3900000||buffer.toString("ascii",0,4)!=="RIFF"||buffer.toString("ascii",8,12)!=="WAVE"||buffer.readUInt16LE(20)!==1||buffer.readUInt16LE(22)!==1||buffer.readUInt32LE(24)!==16000||buffer.readUInt16LE(34)!==16||buffer.readUInt32LE(40)+44>buffer.length){
   res.status(415).json({error:"Invalid 16kHz mono PCM WAV"});return;
  }
+ // New upload becomes a new version; the previous recording is kept for rollback.
+ const current=(await pool.query("SELECT audio_data,mime_type,audio_version,voice FROM "+table+" WHERE path=$1",[req.params.path])).rows[0];
  await pool.query("INSERT INTO "+table+"(path,audio_data,mime_type,is_active,audio_version) VALUES($1,$2,'audio/wav',false,1) ON CONFLICT(path) DO UPDATE SET audio_data=EXCLUDED.audio_data,mime_type='audio/wav',is_active=false,audio_version=gavhah_olam_voice_recordings.audio_version+1,updated_at=now()",[req.params.path,buffer]);
- res.json({ok:true,live:false,needsPublish:true});
+ if(current?.audio_data){
+  await pool.query("UPDATE "+table+" SET previous_audio_data=$2,previous_mime_type=$3,previous_audio_version=$4,previous_voice=$5 WHERE path=$1",
+   [req.params.path,current.audio_data,current.mime_type,current.audio_version,current.voice||"pinchas"]);
+ }
+ const v=(await pool.query("SELECT audio_version FROM "+table+" WHERE path=$1",[req.params.path])).rows[0];
+ res.json({ok:true,live:false,needsPublish:true,audioVersion:v?.audio_version||1});
+}));
+// Change the voice for this button: queue a Yiddish Tools regeneration.
+// The Worker cannot convert MP3 to the required 16 kHz WAV, so the
+// regeneration is queued and a sync process (Muse, with the Yiddish Tools
+// connector) generates it, converts it and stores it as the new version.
+// The old recording stays active until the admin activates the new one.
+router.post("/admin/max/ivr-editor/voice-audio/:path/regenerate",requireVoiceAdmin,wrap(async(req,res)=>{
+ if(!check(req,res))return;
+ const voice=String(req.body?.voice||"pinchas").trim();
+ if(req.body?.confirm!=="REGENERATE_OLAM_VOICE"||!/^[a-z]{1,32}$/.test(voice)){
+  res.status(400).json({error:"Confirm voice change with a valid voice name"});return;
+ }
+ await pool.query("INSERT INTO "+table+"(path,pending_regeneration,pending_voice) VALUES($1,true,$2) ON CONFLICT(path) DO UPDATE SET pending_regeneration=true,pending_voice=EXCLUDED.pending_voice,updated_at=now()",[req.params.path,voice]);
+ res.json({ok:true,queued:true,voice,needsApiKey:true,note:"Regeneration queued. A sync process generates the new audio; the old recording stays live until the admin activates the new version."});
+}));
+// Restore the previous recording version (rollback).
+router.post("/admin/max/ivr-editor/voice-audio/:path/rollback",requireVoiceAdmin,wrap(async(req,res)=>{
+ if(!check(req,res))return;
+ if(req.body?.confirm!=="ROLLBACK_OLAM_VOICE_AUDIO"){res.status(400).json({error:"Confirm rollback"});return;}
+ const r=await pool.query("UPDATE "+table+" SET audio_data=previous_audio_data,mime_type=previous_mime_type,audio_version=previous_audio_version,voice=previous_voice,is_active=false,previous_audio_data=NULL,previous_mime_type=NULL,previous_audio_version=NULL,previous_voice=NULL,pending_regeneration=false,pending_voice=NULL,updated_at=now() WHERE path=$1 AND previous_audio_data IS NOT NULL RETURNING path,audio_version",[req.params.path]);
+ if(!r.rowCount){res.status(404).json({error:"No previous recording to roll back to"});return;}
+ res.json({ok:true,rolledBack:true,audioVersion:r.rows[0].audio_version,active:false});
+}));
+// Switch this button between Yiddish audio and English TTS.
+router.post("/admin/max/ivr-editor/voice-audio/:path/language",requireVoiceAdmin,wrap(async(req,res)=>{
+ if(!check(req,res))return;
+ const language=String(req.body?.language||"");
+ if(req.body?.confirm!=="SET_OLAM_VOICE_LANGUAGE"||(language!=="yi"&&language!=="en")){
+  res.status(400).json({error:"Confirm language switch (yi or en)"});return;
+ }
+ await pool.query("INSERT INTO "+table+"(path,language) VALUES($1,$2) ON CONFLICT(path) DO UPDATE SET language=EXCLUDED.language,updated_at=now()",[req.params.path,language]);
+ res.json({ok:true,language});
 }));
 router.post("/admin/max/ivr-editor/voice-audio/:path/activate",requireVoiceAdmin,wrap(async(req,res)=>{
  if(!check(req,res))return;if(req.body?.confirm!=="ACTIVATE_OLAM_VOICE_AUDIO"){res.status(400).json({error:"Confirm"});return;}
@@ -84,7 +129,7 @@ router.get("/signalwire/olam-voice/:path/:version",wrap(async(req,res)=>{
  if(!validPath(path)||!/^[1-9][0-9]{0,18}$/.test(version)||!/^[a-f0-9]{64}$/.test(sig)){res.sendStatus(404);return;}
  const expected=urlSign(path,version);
  if(!timingSafeEqual(Buffer.from(sig,"hex"),Buffer.from(expected,"hex"))){res.sendStatus(404);return;}
- const row=(await pool.query("SELECT audio_data FROM "+table+" WHERE path=$1 AND audio_version=$2 AND is_active=true",[path,version])).rows[0];
+ const row=(await pool.query("SELECT audio_data FROM "+table+" WHERE path=$1 AND audio_version=$2 AND is_active=true AND (language IS NULL OR language='yi')",[path,version])).rows[0];
  if(!row?.audio_data){res.sendStatus(404);return;}
  res.set("Cache-Control","no-store").set("X-Content-Type-Options","nosniff").type("audio/wav").send(row.audio_data);
 }));

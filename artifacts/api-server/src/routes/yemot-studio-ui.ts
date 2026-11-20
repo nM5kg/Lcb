@@ -48,6 +48,20 @@ a{color:#175e91}#caption{font-weight:700}.current-message{padding:14px;margin:10
 <p class="hint">דער יעצטיגער TTS־מאָטאר פון ימות שטיצט אין דעם עדיטאר דערווייל נאר ענגלישע נוסחאות. דעם אידישן טעקסט אין די מעניו־קעפלעך קען מען זען, אבער דער TTS־אפלאוד וואלט נישט אנגענומען אידיש.</p>
 <div class="actions"><button class="primary" id="saveTts" type="button">אפהיטן דעם נוסח</button><button id="suggest" type="button">לייג אריין דעם איינגעבויטן נוסח</button></div><div class="actions"><button id="resetTts" class="danger" type="button">אויסמעקן מיין נוסח — צוריק צום איינגעבויטן</button><button id="muteTts" class="danger" type="button">אינגאנצן שטיל מאכן דעם TTS</button></div><p class="hint">אויסמעקן דעם אייגענעם נוסח שטעלט צוריק דעם איינגעבויטן. שטיל מאכן גיט גאר קיין TTS; א לייווע רעקארדירונג דארף מען באזונדער אראפנעמען.</p>
 <hr class="divider">
+<h2>אידישער מעניו — דער קנעפל אויף אידיש</h2>
+<label for="yiddishText">אידישער טעקסט פאר דעם קנעפל</label>
+<textarea id="yiddishText" maxlength="950" dir="rtl" style="direction:rtl;text-align:right" placeholder="שרייב דעם אידישן נוסח..."></textarea>
+<p class="hint">דער אידישער טעקסט ווערט גערעדט פון א רעקארדירונג (אודיא), נישט פון TTS. דער אידישער ביישפיל אויבן קען מען אריינקאפירן דא.</p>
+<div class="actions"><button class="primary" id="saveYiddish" type="button">אפהיטן דעם אידישן טעקסט</button></div>
+<label for="voiceSelect">שטימע פאר דעם קנעפל</label>
+<select id="voiceSelect"></select>
+<div class="actions"><button id="regenerate" type="button" class="primary">טויש די שטימע — גענעריר נייע אודיא</button><button id="rollbackYiddish" type="button">צוריק צו דער פריערדיגער אודיא</button></div>
+<p class="hint" id="voiceInfo"></p>
+<label>שפראך פאר דעם קנעפל</label>
+<div class="actions"><button id="langYi" type="button">אידיש (אודיא)</button><button id="langEn" type="button">ענגליש (TTS)</button></div>
+<p class="hint" id="langInfo"></p>
+<div class="actions"><button id="deletePhrase" class="danger" type="button">אויסמעקן דעם אידישן פראַזע און אודיא</button></div>
+<hr class="divider">
 <h2>רעקארדירונג פאר דער עקסטענשאן</h2>
 <label for="file">ארויפלייגן א רעקארדירונג (WAV, WEBM, OGG, MP3)</label>
 <input id="file" type="file" accept="audio/wav,audio/wave,audio/webm,audio/ogg,audio/mpeg,audio/mp3">
@@ -65,9 +79,25 @@ a{color:#175e91}#caption{font-weight:700}.current-message{padding:14px;margin:10
 const root="/api/admin/yemot/voice-studio",el=id=>document.getElementById(id);
 let catalog=[],prompts=new Map(),selected=null,trail=[],blob=null,recorder=null,chunks=[],stream=null,objectUrl=null,busy=false,verifiedFolder=false,voiceLab=null,voiceLabPath=null;
 const escapeNothing=s=>String(s||"");
+// Yiddish Tools voices (GET https://yiddish.tools/api/v1/voices, 2026-11-16).
+const YIDDISH_VOICES=[["pinchas","פנחס — Calm narrator"],["rochel","רחל — Woman"],["nachman","נחמן — Elder"],["gitty","גיטי — Clear and bright"],["shimi","שימי — Deep voice"],["blimy","בלימי — Young woman"],["berel","בערל — Storyteller"],["moishy","מוישי — Teenager"],["hershel","הערשל — Older, warm"],["leiby","לייבי — Young, deep"],["shloimy","שלוימי — Steady voice"],["zalmen","זלמן — Older, deep"],["avrumi","אברומי — Conversational, mid"],["yanky","יענקי — Conversational, higher"],["mottel","מאטל — Conversational, low"],["duvid","דוד — Conversational, higher"],["lipa","ליפא — Conversational, mid"],["reuven","ראובן — Litvish accent"],["itzik","איציק — Israeli accent"]];
+(function(){const s=el("voiceSelect");for(const [id,label] of YIDDISH_VOICES){const o=document.createElement("option");o.value=id;o.textContent=label;s.append(o)}})();
+function showYiddishControls(){
+ const row=selected?prompts.get(selected.path):null;
+ el("yiddishText").value=row?.yiddish_text||"";
+ el("voiceSelect").value=row?.voice||"pinchas";
+ const lang=row?.language||"en";
+ el("langInfo").textContent=lang==="yi"?"דער קנעפל רעדט יעצט אידיש (אודיא, אויב פובליצירט).":"דער קנעפל רעדט יעצט ענגליש (TTS).";
+ el("langYi").disabled=busy||lang==="yi";el("langEn").disabled=busy||lang==="en";
+ el("voiceInfo").textContent="ווערסיע: "+(row?.audio_version||1)+(row?.previous_audio_version?" · פריערדיגע ווערסיע "+row.previous_audio_version+" איז דא פאר צוריקדריי.":"")+(row?.pending_regeneration?" · א נייע שטימע ווערט גענערירט ("+(row.pending_voice||"")+")...":"");
+ el("regenerate").disabled=busy||!el("yiddishText").value.trim();
+ el("rollbackYiddish").disabled=busy||!row?.previous_audio_version;
+ el("deletePhrase").disabled=busy||!(row?.yiddish_text||row?.audio_size);
+ el("saveYiddish").disabled=busy;
+}
 
 const recYiddishSamples={
-"root":"ברוכים הבאים צו גבהה. פאר חסד־נייעס דרוקט 1. פאר עסקנים־שמועסן דרוקט 2. פאר פריוואטע הילף דרוקט 3. פאר התקבצו לטובה דרוקט 4. פאר עולם החסד קאמיוניקאציע דרוקט 5. פאר היינטיגע צדקה דרוקט 6. פאר מנינים דרוקט 7. פאר גרופעס דרוקט 8. פאר מיין עסקנות דרוקט 9. פאר זוכן גיט אריין 11. פאר מעלדונגען 12. פאר מיינע פארבינדונגען 13. פאר כח הרבים 14. פאר מיין פראפיל 15. פאר מער אפטיילונגען 77. פאר קאמפיין סענטער 4444. פאר גבהה־רעגיסטראציע דרוקט 0.",
+"root":"ברוכים הבאים צו גבהה. פאר חסד־נייעס דרוקט 1. פאר עסקנים־שמועסן דרוקט 2. פאר פריוואטע הילף דרוקט 3. פאר התקבצו לטובה דרוקט 4. פאר עולם החסד קאמיוניקאציע דרוקט 5. פאר היינטיגע צדקה דרוקט 6. פאר מנינים דרוקט 7. פאר גרופעס דרוקט 8. פאר מיין עסקנות דרוקט 9. פאר זוכן גיט אריין 11. פאר מעלדונגען 12. פאר מיינע פארבינדונגען 13. פאר כח הרבים 14. פאר מיין פראפיל 15. צו קאנטאקטירן א גבהה־מעמבער לויט זיין מעמבער־איי־די דרוקט 16. פאר מער אפטיילונגען דרוקט 77. פאר פארגעשריטענע מיין עסקנות דרוקט 88. פאר קאמפיין סענטער גיט אריין 4444. פאר גבהה־רעגיסטראציע דרוקט 0. צו גיין צוריק צום פריערדיגן מעניו דרוקט שטערן.",
 "11":"צו הערן אלע אפדעיטס, ווארט אויפן ליין. פאר אנדערע אפציעס, דרוק 1.",
 "97111":"פאר וויכטיגע נייעס דרוקט 1. פאר אויסגעצייכנטע אפדעיטס דרוקט 2. פאר אן ארטיקל לויטן נומער דרוקט 3. פאר אלע אפדעיטס דרוקט 4.",
 "111":"איר הערט יעצט די לעצטע אפדעיטס. בלייבט אויפן ליין פארן נעקסטן.",
@@ -135,6 +165,7 @@ function updateAudioControls(){
  el("publish").disabled=busy||!row?.audio_size||selected?.path==="1856";el("unpublish").disabled=busy||!row?.published_path;
  el("discardAudio").disabled=busy||!blob;el("deleteDraft").disabled=busy||!row?.audio_size;
  el("deletePublished").disabled=busy||!row?.published_path;
+ showYiddishControls();
 }
 function showCurrentSpeech(){
  if(!selected)return;const row=prompts.get(selected.path);
@@ -159,7 +190,8 @@ function rootChoices(){
   ["13","97193","מיינע פארבינדונגען — My Connections"],
   ["14","19","כח הרבים דעשבאורד — Koach Harabim"],
   ["15","182","מיין פראפיל — My Profile"],
-  ["77","9777","מער אפטיילונגען — רעזערוואציעס, סיסטעם־צענטער, און אלע פריערדיגע פונקציעס"],
+  ["16","9716","צו קאנטאקטירן א גבהה־מעמבער — Contact a member"],
+  ["77","192","מער אפטיילונגען — סיסטעם־צענטער (live v117: 77 returns the system-center summary itself, not a 9777 submenu)"],
   ["88","88","פארגעשריטענע מיין עסקנות־כלים"],
   ["4444","2","קאמפיין סענטער"],
   ["0","185","אויפשרייבן אלס גבהה־מעמבער"]
@@ -226,7 +258,7 @@ function select(node){
  selected=node;showRecYiddish(node);blob=null;el("file").value="";el("editor").hidden=false;
  el("heading").textContent=(node.path==="root"?"הויפט־מעניו":"קנעפל "+(trail[trail.length-1]?.displayDigit||node.path.slice(-1))+" — "+node.label);
  el("details").textContent="טעכנישע עקסטענשאן: "+node.path+" · אונטער־מעניו: "+node.parent+" · "+(node.kind==="menu"?"אפטיילונג מיט קנעפלעך":"לעצטער קנעפל");
- const saved=prompts.get(node.path);el("tts").value=saved?.tts_text?.trim()?saved.tts_text:(node.effectiveTts||node.suggestedEnglish||"");showCurrentSpeech();
+ const saved=prompts.get(node.path);el("tts").value=saved?.tts_text?.trim()?saved.tts_text:(node.effectiveTts||node.suggestedEnglish||"");showCurrentSpeech();showYiddishControls();
  el("audioState").textContent=saved?.published_path?"אויפן האטליין פובליצירט: "+saved.published_path+(saved?.audio_size?" · אויך דא א פריוואטע רעקארדירונג.":""):saved?.audio_size?"א פריוואטע רעקארדירונג איז אפגעהיטן, אבער נאך נישט פובליצירט.":"נאך נישט דא קיין אפגעהיטענע רעקארדירונג.";
  setPreview(saved?.audio_size?selectedApi("/audio"):null);
  if(node.path==="1856")el("audioState").textContent+=" דער 4־ציפערדיקער איי־די ווערט געשאפן פערזענליך ביים רוף. אויף דעם שריט נוצט דער האטליין TTS מיט {member_id}, נישט א סטאטישע רעקארדירונג.";
@@ -275,6 +307,51 @@ el("muteTts").onclick=async()=>{
  if(result)await refresh();
 };
 el("suggest").onclick=()=>{if(selected)el("tts").value=selected.effectiveTts||selected.suggestedEnglish||""};
+el("saveYiddish").onclick=async()=>{
+ if(!selected)return;const value=el("yiddishText").value;
+ const saved=await execute(()=>request(selectedApi("/yiddish"),"PUT",{yiddishText:value}),"דער אידישער טעקסט איז אפגעהיטן.");
+ if(saved){prompts.set(selected.path,{...prompts.get(selected.path),yiddish_text:value});showYiddishControls();}
+};
+async function pollRegeneration(path,generationId){
+ for(let i=0;i<30;i++){
+  await new Promise(r=>setTimeout(r,2000));
+  try{
+   const d=await request(root+"/"+encodeURIComponent(path)+"/regeneration/"+encodeURIComponent(generationId),"GET");
+   if(d.stored){message("נייע אודיא גענערירט (ווערסיע "+d.audioVersion+"). זי איז פריוואט אפגעהיטן; פובליציר זי צו זי זאל ווערן לייוו.");await refresh();return}
+   if(d.status==="failed"||d.status==="error"){message("די גענעראציע איז נישט געלונגען: "+(d.error||""),true);return}
+  }catch(e){message("קען נישט נאכקוקן די גענעראציע: "+e.message,true);return}
+ }
+ message("די גענעראציע נעמט לאנג; פרוביר שפעטער נאכאמאל.",true);
+}
+el("regenerate").onclick=async()=>{
+ if(!selected)return;const voice=el("voiceSelect").value;
+ if(!confirm("גענערירן די אודיא פאר דעם קנעפל מיט דער שטימע "+voice+"? די אלטע אודיא בלייבט ביז דו פובליצירסט די נייע."))return;
+ const path=selected.path;
+ const result=await execute(()=>request(root+"/"+encodeURIComponent(path)+"/regenerate","POST",{voice,confirm:"REGENERATE_YIDDISH_AUDIO"}),"");
+ if(!result)return;
+ if(result.queued){message("די רעגענעראציע איז אין דער ריי (קיין API־שליסל אויפן Worker). די אלטע אודיא בלייבט לייוו.");await refresh();return}
+ message("גענערירט...");pollRegeneration(path,result.generationId);
+};
+el("rollbackYiddish").onclick=async()=>{
+ if(!selected||!confirm("צוריקדרייען צו דער פריערדיגער אודיא?"))return;
+ const path=selected.path;const result=await execute(()=>request(root+"/"+encodeURIComponent(path)+"/rollback","POST",{confirm:"ROLLBACK_YIDDISH_AUDIO"}),"די פריערדיגע אודיא איז צוריקגעשטעלט.");
+ if(result)await refresh();
+};
+el("langYi").onclick=async()=>{
+ if(!selected)return;const path=selected.path;
+ const result=await execute(()=>request(root+"/"+encodeURIComponent(path)+"/language","POST",{language:"yi",confirm:"SET_MENU_LANGUAGE"}),"דער קנעפל רעדט יעצט אידיש.");
+ if(result)await refresh();
+};
+el("langEn").onclick=async()=>{
+ if(!selected)return;const path=selected.path;
+ const result=await execute(()=>request(root+"/"+encodeURIComponent(path)+"/language","POST",{language:"en",confirm:"SET_MENU_LANGUAGE"}),"דער קנעפל רעדט יעצט ענגליש (TTS).");
+ if(result)await refresh();
+};
+el("deletePhrase").onclick=async()=>{
+ if(!selected||!confirm("אויסמעקן דעם אידישן פראַזע און זיין אודיא פאר דעם קנעפל? דער ענגלישער TTS בלייבט."))return;
+ const path=selected.path;const result=await execute(()=>request(root+"/"+encodeURIComponent(path)+"/phrase","DELETE",{confirm:"DELETE_YIDDISH_PHRASE"}),"דער אידישער פראַזע איז אויסגעמעקט.");
+ if(result)await refresh();
+};
 el("discardAudio").onclick=()=>{
  if(!blob)return;blob=null;el("file").value="";const saved=selected?prompts.get(selected.path):null;
  setPreview(saved?.audio_size?selectedApi("/audio"):null);
