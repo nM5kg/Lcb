@@ -87,19 +87,41 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   useEffect(() => { void refresh(); }, [refresh]);
 
   const login = useCallback(async (identifier: string, password: string): Promise<{ ok: boolean; error?: string }> => {
-    try {
-      const res = await fetch("/api/auth/login", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        credentials: "include",
-        body: JSON.stringify({ identifier, password }),
-      });
-      const data = await res.json();
-      if (res.ok) { setUser(data.user); void loadAccounts(); return { ok: true }; }
-      return { ok: false, error: data.error ?? "Login failed" };
-    } catch {
-      return { ok: false, error: "Connection error. Please try again." };
+    // A cold Worker / waking database can fail the first request(s): the
+    // connection can drop, the Worker can answer with a non-JSON error page,
+    // or the endpoint can return 503 while it warms up. None of those mean
+    // the credentials are wrong, so retry transient failures with backoff.
+    // Only a real JSON answer (e.g. 401 "Invalid credentials") ends the
+    // attempt immediately. After all retries, report that the server did
+    // not answer instead of the generic connection error.
+    const retryDelaysMs = [1000, 3000];
+    const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+    for (let attempt = 0; attempt <= retryDelaysMs.length; attempt++) {
+      const isLastAttempt = attempt === retryDelaysMs.length;
+      try {
+        const res = await fetch("/api/auth/login", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          credentials: "include",
+          body: JSON.stringify({ identifier, password }),
+        });
+        const text = await res.text();
+        let data: { user?: unknown; error?: string } = {};
+        try {
+          data = text ? JSON.parse(text) as typeof data : {};
+        } catch {
+          if (res.status >= 500 && !isLastAttempt) { await sleep(retryDelaysMs[attempt]); continue; }
+          return { ok: false, error: `Server error (HTTP ${res.status}). Please try again.` };
+        }
+        if (res.ok) { setUser(data.user as never); void loadAccounts(); return { ok: true }; }
+        if (res.status >= 500 && !isLastAttempt) { await sleep(retryDelaysMs[attempt]); continue; }
+        return { ok: false, error: data.error ?? "Login failed" };
+      } catch {
+        if (!isLastAttempt) { await sleep(retryDelaysMs[attempt]); continue; }
+        return { ok: false, error: "The server did not answer. Please tap Sign In again." };
+      }
     }
+    return { ok: false, error: "The server did not answer. Please tap Sign In again." };
   }, [loadAccounts]);
 
   const logout = useCallback(async () => {
@@ -116,7 +138,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       if(!response.ok)return {ok:false,error:result.error||"Could not verify this account"};
       await loadAccounts();
       return {ok:true};
-    }catch{return {ok:false,error:"Connection error"};}
+    }catch{return {ok:false,error:"The server did not answer. Please try again."};}
   },[loadAccounts]);
 
   const switchAccount=useCallback(async(userId:number)=>{
@@ -128,7 +150,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       // Account-bound React Query caches, permissions and forms are reset.
       window.location.reload();
       return {ok:true};
-    }catch{return {ok:false,error:"Connection error"};}
+    }catch{return {ok:false,error:"The server did not answer. Please try again."};}
   },[]);
 
   const removeAccount=useCallback(async(userId:number)=>{
@@ -139,7 +161,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       if(!response.ok)return {ok:false,error:result.error||"Could not remove linked account"};
       await loadAccounts();
       return {ok:true};
-    }catch{return {ok:false,error:"Connection error"};}
+    }catch{return {ok:false,error:"The server did not answer. Please try again."};}
   },[loadAccounts]);
 
   return (
