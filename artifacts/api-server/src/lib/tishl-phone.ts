@@ -36,7 +36,7 @@ import { hebrewFromFixed, fixedFromGregorian, gregorianFromFixed, fixedFromHebre
 export const TISHL_TZ = "America/New_York";
 
 /** Queue item shape (mirrors TishlQueueItem from tishl-queue.ts). */
-export type TishlItemKind = "task" | "case" | "missed_call" | "message";
+export type TishlItemKind = "task" | "case" | "missed_call" | "message" | "scheduled_call";
 export type TishlQueueItemView = {
   kind: TishlItemKind;
   id: number;
@@ -177,13 +177,38 @@ export function remindTonight(now: Date, timeZone: string): Date {
   return zonedTimeToUtc(p.year, p.month, p.day, 23, 59, timeZone);
 }
 
+// Day names — Jewish calendar (Yakob 2026-11-20 00:07–00:08, standing rule).
+// Friday is ALWAYS the full phrase "Friday Erev Shabbos Kodesh" /
+// "פרייטאג ערב שבת קודש" — a bare "Friday" and a bare "Erev Shabbos
+// Kodesh" are BOTH violations for a Friday rendering. Saturday renders
+// as Motzei Shabbos Kodesh (the system works Erev Shabbos and Motzei
+// Shabbos, never on Shabbos itself). "Shabbos" / "שבת" must NEVER appear
+// except inside those two phrases — never "Shabbos Kodesh", never
+// "today is Shabbos". The spoken prompts in this system are English
+// (English-default rule), so formatSpokenDateTime uses the English
+// forms; the Yiddish forms are exported for Yiddish prompts/recordings.
+export const ENGLISH_WEEKDAYS = [
+  "Sunday", "Monday", "Tuesday", "Wednesday", "Thursday",
+  "Friday Erev Shabbos Kodesh", "Motzei Shabbos Kodesh",
+];
+export const YIDDISH_WEEKDAYS = [
+  "זונטאג", "מאָנטאג", "דינסטאג", "מיטוואך", "דאנערשטאג",
+  "פרייטאג ערב שבת קודש", "מוצאי שבת קודש",
+];
+
+/** The day name of a date, in the caller's language. */
+export function spokenDayName(date: Date, timeZone: string, lang: "en" | "yi" = "en"): string {
+  const p = tzParts(date, timeZone);
+  const idx = new Date(Date.UTC(p.year, p.month - 1, p.day)).getUTCDay();
+  return (lang === "yi" ? YIDDISH_WEEKDAYS : ENGLISH_WEEKDAYS)[idx];
+}
+
 /** "Tuesday, December 2, 2026 at 3 30 PM" (spaces, not colons, for TTS). */
 export function formatSpokenDateTime(date: Date, timeZone: string): string {
   const p = tzParts(date, timeZone);
-  const weekdays = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
   const months = ["January", "February", "March", "April", "May", "June", "July",
                   "August", "September", "October", "November", "December"];
-  const weekday = weekdays[new Date(Date.UTC(p.year, p.month - 1, p.day)).getUTCDay()];
+  const weekday = spokenDayName(date, timeZone, "en");
   const hour12 = p.hour % 12 === 0 ? 12 : p.hour % 12;
   const ampm = p.hour < 12 ? "A M" : "P M";
   const minute = String(p.minute).padStart(2, "0");
@@ -279,6 +304,7 @@ const KIND_LABEL: Record<TishlItemKind, string> = {
   case: "Case",
   missed_call: "Missed call",
   message: "Message",
+  scheduled_call: "Scheduled call",
 };
 
 /** The spoken line for one queue item while listening. */
@@ -296,6 +322,7 @@ export function describeTishlItem(item: TishlQueueItemView, pos: number, total: 
 export function actionMenuSpeech(item: TishlQueueItemView | null): string {
   const contextual =
     item?.kind === "missed_call" ? "call this number back" :
+    item?.kind === "scheduled_call" ? "call this number back" :
     item?.kind === "task" ? "open this task" :
     item?.kind === "case" ? "open this case" :
     item?.kind === "message" ? "hear this message in full" : "use this item";

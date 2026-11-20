@@ -7,13 +7,14 @@ import type { PoolClient } from "pg";
  * by user_id / owner_user_id. Nothing here touches production data.
  */
 
-export type TishlItemKind = "task" | "case" | "missed_call" | "message";
+export type TishlItemKind = "task" | "case" | "missed_call" | "message" | "scheduled_call";
 
 export const TISHL_ITEM_KINDS: readonly TishlItemKind[] = [
   "task",
   "case",
   "missed_call",
   "message",
+  "scheduled_call",
 ];
 
 export type TishlQueueItem = {
@@ -110,7 +111,23 @@ export async function getTishlQueue(
       "COALESCE(n.message,'') AS detail,NULL::text AS phone,n.created_at," +
       "EXISTS(SELECT 1 FROM public.tishl_holds h WHERE h.user_id=n.user_id " +
       "AND h.item_kind='message' AND h.item_id=n.id) AS held " +
-      "FROM public.notifications n WHERE n.user_id=$1 AND n.is_read=false" +
+      "FROM public.notifications n WHERE n.user_id=$1 AND n.is_read=false " +
+      "UNION ALL " +
+      // Calling option 6: a scheduled call whose Tishl reminder is due.
+      // The reminder row is inserted by insertScheduledCall (calling-queue)
+      // and flipped to 'surfaced' by the update above; until the reminder
+      // is due the item stays hidden (outer pending-future filter below).
+      // NOTE: this branch can only fire once the live tishl_reminders
+      // item_kind CHECK is widened to include 'scheduled_call' (see
+      // calling-queue.ts header). Reads are unaffected by the CHECK.
+      "SELECT 'scheduled_call'::text,s.id," +
+      "('Scheduled call to '||COALESCE(NULLIF(s.display_name,''),s.number_e164)) AS title," +
+      "COALESCE(s.note,'') AS detail,s.number_e164 AS phone,s.scheduled_at AS created_at," +
+      "EXISTS(SELECT 1 FROM public.tishl_holds h WHERE h.user_id=s.user_id " +
+      "AND h.item_kind='scheduled_call' AND h.item_id=s.id) AS held " +
+      "FROM public.calling_scheduled_calls s WHERE s.user_id=$1 AND s.status='pending' " +
+      "AND EXISTS(SELECT 1 FROM public.tishl_reminders r WHERE r.user_id=$1 " +
+      "AND r.item_kind='scheduled_call' AND r.item_id=s.id AND r.status='surfaced')" +
       ") q " +
       "WHERE NOT EXISTS(SELECT 1 FROM public.tishl_done d " +
       "WHERE d.user_id=$1 AND d.item_kind=q.kind AND d.item_id=q.id) " +
@@ -166,8 +183,16 @@ export async function markTishlDone(
   } else if (kind === "missed_call") {
     await client.query(
       "UPDATE public.max_return_calls SET status=$3,updated_at=now() " +
-        "WHERE id=$1 AND owner_user_id=$2",
+      "WHERE id=$1 AND owner_user_id=$2",
       [id, userId, TISHL_RETURN_CALL_DONE_STATUS],
+    );
+  } else if (kind === "scheduled_call") {
+    // A scheduled call marked done is completed, not deleted: the
+    // calling_scheduled_calls row is the record.
+    await client.query(
+      "UPDATE public.calling_scheduled_calls SET status='completed',updated_at=now() " +
+        "WHERE id=$1 AND user_id=$2 AND status IN ('pending','reminded')",
+      [id, userId],
     );
   }
   // 'case': deliberately no source change; the tishl_done row is the record.
@@ -197,6 +222,11 @@ export async function deleteTishlItem(
   } else if (kind === "missed_call") {
     removed = (await client.query(
       "DELETE FROM public.max_return_calls WHERE id=$1 AND owner_user_id=$2",
+      [id, userId],
+    )).rowCount ?? 0;
+  } else if (kind === "scheduled_call") {
+    removed = (await client.query(
+      "DELETE FROM public.calling_scheduled_calls WHERE id=$1 AND user_id=$2",
       [id, userId],
     )).rowCount ?? 0;
   } else {
