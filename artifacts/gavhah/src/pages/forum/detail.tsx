@@ -24,6 +24,7 @@ import { useToast } from "@/hooks/use-toast";
 import { useEngagementSettings, settingFor } from "@/lib/engagement-settings";
 import { DiscussionTicker } from "@/components/shared/discussion-ticker";
 import { UpvoteButton } from "@/components/shared/upvote-button";
+import { PostRecordingPlayer } from "@/components/shared/post-recording-player";
 import { useUpvoteStates } from "@/hooks/use-upvote-states";
 import { visibleForumTopic } from "@/lib/forum-topic";
 
@@ -448,6 +449,16 @@ export default function ForumDetail() {
                   <p key={i} className="mb-3">{para}</p>
                 ))}
               </div>
+
+              {/* A discussion opened on the hotline has no written text —
+                  its recording IS the content. It is carried and shown
+                  here so it is never lost or hidden (Yakob 2026-11-20). */}
+              {!discussion.content.trim() && discussion.recordingStatus && (
+                <p className="text-sm text-muted-foreground mb-4">
+                  This discussion was opened by phone. Listen to the recording below.
+                </p>
+              )}
+              <PostRecordingPlayer postType="discussion" postId={discussion.id} recordingStatus={discussion.recordingStatus} canReview={isAdmin} />
 
               <div className="flex items-center gap-6 pt-4 border-t text-sm text-muted-foreground">
                 <UpvoteButton

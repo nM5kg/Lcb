@@ -12,6 +12,7 @@ import { ArrowLeft } from "lucide-react";
 import { Link } from "wouter";
 import { MemberGate } from "@/components/shared/member-gate";
 import { DisplayAsSelector, type DisplayAs, getDisplayName } from "@/components/shared/display-as-selector";
+import { AudioRecordingField, uploadPostRecording, type AudioRecordingValue } from "@/components/shared/audio-recording-field";
 import { useAuth } from "@/context/auth-context";
 import { ActiveAccountIdentity } from "@/components/shared/account-switcher";
 import { useLanguage } from "@/context/language-context";
@@ -26,6 +27,7 @@ export default function ForumNew() {
   const [title, setTitle] = useState("");
   const [content, setContent] = useState("");
   const [category, setCategory] = useState("");
+  const [recording, setRecording] = useState<AudioRecordingValue>(null);
   const [displayAs, setDisplayAs] = useState<DisplayAs>("nickname");
   const createDiscussion = useCreateDiscussion();
 
@@ -38,6 +40,16 @@ export default function ForumNew() {
       {
         onSuccess: (disc) => {
           void qc.invalidateQueries({ queryKey: ["/api/discussions"] });
+          // The recording attaches after the discussion exists (it needs
+          // the id). It waits for review before it reaches the hotline.
+          if (recording) {
+            const attached = recording;
+            void uploadPostRecording("discussion", disc.id, attached).then((r) => {
+              if (r.ok) toast({ title: "Recording attached", description: "Your recording waits for review before it reaches the hotline." });
+              else toast({ title: "Discussion posted, recording not attached", description: r.error || "Please try attaching the recording again.", variant: "destructive" });
+            });
+          }
+          setRecording(null);
           toast({ title: "Discussion published", description: "Your discussion is now live." });
           navigate(`/forum/${disc.id}`);
         },
@@ -114,6 +126,8 @@ export default function ForumNew() {
               </div>
 
               <DisplayAsSelector value={displayAs} onChange={setDisplayAs} />
+
+              <AudioRecordingField value={recording} onChange={setRecording} />
 
               <div className="flex gap-4 justify-end pt-4 border-t">
                 <Link href="/forum">
