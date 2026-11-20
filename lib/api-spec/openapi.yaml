@@ -2372,6 +2372,9 @@ components:
           type: string
         updatedAt:
           type: ["string", "null"]
+        recordingStatus:
+          type: ["string", "null"]
+          description: Recording attached to this discussion — published (plays on the hotline), pending (waiting for review, visible to the author/staff only), rejected, or null when no recording is attached.
 
     DiscussionInput:
       type: object
@@ -2474,6 +2477,9 @@ components:
           type: integer
         createdAt:
           type: string
+        recordingStatus:
+          type: ["string", "null"]
+          description: Recording attached to this update — published (plays on the hotline), pending (waiting for review, visible to the author/staff only), rejected, or null when no recording is attached.
 
     NewsArticleInput:
       type: object
