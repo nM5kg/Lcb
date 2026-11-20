@@ -19,7 +19,7 @@ function decrypt(row:Stored):string{
 async function request(token:string,action:string,params:Record<string,string>):Promise<any>{
  const response=await fetch(url+action,{
   method:"POST",headers:{"Content-Type":"application/x-www-form-urlencoded","Accept":"application/json"},
-  body:new URLSearchParams({token,...params}),cache:"no-store",redirect:"error",
+  body:new URLSearchParams({token,...params}),cache:"no-store",redirect: "manual",
   signal:AbortSignal.timeout(16000)
  });
  if(!response.ok)throw Error("Yemot "+action+" HTTP error");

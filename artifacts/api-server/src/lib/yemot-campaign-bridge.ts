@@ -48,7 +48,7 @@ export async function forwardCampaign4444(req:Request,res:Response):Promise<void
    method:"POST",headers:{"Content-Type":"application/json","Accept":"text/plain",
      "X-CC-Bridge-Signature":signature},
    body:JSON.stringify({call,key:field,value,stamp}),
-   redirect:"error",cache:"no-store",signal:AbortSignal.timeout(12000)
+   redirect: "manual",cache:"no-store",signal:AbortSignal.timeout(12000)
   });
   if(!response.ok)throw Error("Campaign Center rejected bridge request");
   const reply=await response.text();

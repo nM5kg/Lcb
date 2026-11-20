@@ -74,6 +74,11 @@ export async function signalWireSharedHotline(req:Request,res:Response):Promise<
  const signature=String(req.get("x-signalwire-signature")||
    req.get("x-twilio-signature")||"");
  const form=req.body as Record<string,string>;
+ // Derive the callback URL from the request host, so the copy answers on its
+ // own workers.dev address instead of the old live worker (the signature is
+ // computed over the URL the provider actually called).
+ const baseUrl="https://"+(req.get("x-forwarded-host")||req.get("host")||"");
+ const callbackUrl=baseUrl+"/api/signalwire/shared-ivr";
  const diagId=randomUUID();
  const started=Date.now();
  // This HMAC reference joins multiple keypad callbacks without logging caller
@@ -91,7 +96,7 @@ export async function signalWireSharedHotline(req:Request,res:Response):Promise<
  diagnostic("received","provider_callback_received",null);
  try{
  if(req.method!=="POST"||req.originalUrl!=="/api/signalwire/shared-ivr"||
-  !checkSignalWireSignature(signingKey,signature,SHARED_SIGNALWIRE_URL,form)){
+  !checkSignalWireSignature(signingKey,signature,callbackUrl,form)){
   diagnostic("authentication",signatureFailureReason(req.method,req.originalUrl,signingKey,signature,form),403);
   res.status(403).type("text/plain").send("Invalid SignalWire callback signature");
   return;
@@ -172,10 +177,18 @@ export async function signalWireSharedHotline(req:Request,res:Response):Promise<
   res.status(status).type("text/plain").send("Gavhah phone engine unavailable");
   return;
  }
- const root=reply.startsWith("read=t-Gavhah SignalWire main menu.");
+ // Root detection is by call-state path, NOT by prompt text: the true
+ // 16-department root is Yiddish text ("ברוכים הבאים צו גבהה") — and,
+ // once published, a root audio file — so the old text-prefix check
+ // ("Gavhah SignalWire main menu.") could never match it, and with
+ // sharedRootMode false the Gather would allow only ONE digit at the root
+ // (11/12/77/88/4444 unreachable on SignalWire). At the root the stored
+ // path is "" (after a 0-back to root too); the gate stores "120".
+ const statePath=(await pool.query<{path:string}>("SELECT path FROM public.gavhah_yemot_call_states WHERE call_hash=$1",[callHash])).rows[0]?.path;
+ const root=!statePath;
  res.status(200).type("application/xml; charset=utf-8")
   .set("Cache-Control","no-store")
-  .send(convertGavhahReplyToCxml(reply,SHARED_SIGNALWIRE_URL,root,await olamMenuAudioUrl((await pool.query<{path:string}>("SELECT path FROM public.gavhah_yemot_call_states WHERE call_hash=$1",[callHash])).rows[0]?.path||"root"),true,await olamMenuAudioUrl("retry")));
+  .send(convertGavhahReplyToCxml(reply,callbackUrl,root,await olamMenuAudioUrl(statePath||"root",baseUrl),true,await olamMenuAudioUrl("retry",baseUrl)));
  diagnostic("completed","ivr_response_sent",200);
  }catch(error){
   // Avoid logging secret-bearing database or provider exception messages.

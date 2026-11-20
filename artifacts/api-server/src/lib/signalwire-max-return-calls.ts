@@ -25,18 +25,21 @@ const e164=(x:unknown)=>{
 };
 const digest=(id:string,kind:string)=>createHmac("sha256",macKey())
  .update("olam-return-calls-v1:"+kind+":"+id).digest("hex");
-const action=(id:string,kind:string)=>{
+const action=(id:string,kind:string,base?:string)=>{
  const path="/api/signalwire/max/return/"+id+"/"+kind;
- return root+path+"?mac="+digest(id,kind);
+ return (base||root)+path+"?mac="+digest(id,kind);
 };
 function validate(req:Request,res:Response,kind:string):boolean{
  const id=String(req.params.id||"");
  const got=String(req.query.mac||"");
  const sig=String(req.get("x-signalwire-signature")||req.get("x-twilio-signature")||"");
  const expected=digest(id,kind);
+ // Derive the callback base from the request host (the copy answers on its
+ // own workers.dev address); `root` stays as the fallback.
+ const base="https://"+(req.get("x-forwarded-host")||req.get("host")||"");
  if(!active()||req.method!=="POST"||!/^\d{1,18}$/.test(id)||
    !/^[a-f0-9]{64}$/.test(got)||!timingSafeEqual(Buffer.from(got,"hex"),Buffer.from(expected,"hex"))||
-   !checkSignalWireSignature(macKey(),sig,action(id,kind),req.body)){
+   !checkSignalWireSignature(macKey(),sig,action(id,kind,base),req.body)){
   res.status(403).send("Invalid signed return-call request");return false;
  }
  return true;

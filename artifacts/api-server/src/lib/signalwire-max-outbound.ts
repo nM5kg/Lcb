@@ -86,7 +86,7 @@ export async function fetchOlamVoicemailAudio(recordingId:string):Promise<Buffer
   "/Recordings/"+encodeURIComponent(recordingId)+".wav";
  const response=await fetch(url,{headers:{Authorization:"Basic "+
   Buffer.from(project+":"+unseal(row)).toString("base64")},
-  redirect:"error",cache:"no-store",signal:AbortSignal.timeout(10000)});
+  redirect: "manual",cache:"no-store",signal:AbortSignal.timeout(10000)});
  if(!response.ok)throw Object.assign(Error("Voicemail unavailable from SignalWire"),{status:502});
  if(Number(response.headers.get("content-length")||0)>12000000)
   throw Object.assign(Error("Voicemail too large"),{status:413});
@@ -110,7 +110,7 @@ function callback(c:Config,sessionId:string,part:"bridge"|"agent"|"donor"){
 const apiJson=async(c:Config,path:string)=>{
  const response=await fetch("https://"+c.space+path,{
   headers:{Authorization:authenticated(c),Accept:"application/json"},
-  signal:AbortSignal.timeout(9000),redirect:"error",cache:"no-store"
+  signal:AbortSignal.timeout(9000),redirect: "manual",cache:"no-store"
  });
  if(!response.ok)throw Object.assign(Error("SignalWire number lookup unavailable"),{status:502});
  return response.json() as Promise<any>;
@@ -186,7 +186,7 @@ export async function placeOlamMaxOutboundCall(userId:number,sessionId:string,
   response=await fetch(callUrl(c,"/Calls.json"),{
    method:"POST",headers:{Authorization:authenticated(c),
     "Content-Type":"application/x-www-form-urlencoded",Accept:"application/json"},
-   body,redirect:"error",signal:AbortSignal.timeout(13000)
+   body,redirect: "manual",signal:AbortSignal.timeout(13000)
   });
  }catch{
   // A timeout may mean the provider DID place the call; don't free it for retry.
@@ -229,7 +229,7 @@ export async function endOlamMaxOutboundCall(userId:number,sessionId:string){
  const response=await fetch(url,{
   method:"POST",headers:{Authorization:authenticated(c),
    "Content-Type":"application/x-www-form-urlencoded",Accept:"application/json"},
-  body:new URLSearchParams({Status:status}),redirect:"error",
+  body:new URLSearchParams({Status:status}),redirect: "manual",
   cache:"no-store",signal:AbortSignal.timeout(11000)
  });
  if(!response.ok)throw Object.assign(Error("SignalWire did not confirm hangup; use your physical phone"),{status:503});

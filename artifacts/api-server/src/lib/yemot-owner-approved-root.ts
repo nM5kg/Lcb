@@ -39,7 +39,7 @@ async function provider(token:string, method:string, data:Record<string,string>)
       "Content-Type":"application/x-www-form-urlencoded",
       "Accept":"application/json"
     },
-    redirect:"error",
+    redirect: "manual",
     cache:"no-store",
     signal:AbortSignal.timeout(18000)
   });

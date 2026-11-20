@@ -76,8 +76,12 @@ export async function signalWireNextHotline(req:Request,res:Response){
  const signature=String(req.get("x-signalwire-signature")||
    req.get("x-twilio-signature")||"");
  const form=req.body as SimpleForm;
+ // Derive the callback URL from the request host (the copy answers on its
+ // own workers.dev address; the provider signature is computed over the URL
+ // actually called). SIGNALWIRE_URL stays as the fallback for other callers.
+ const callbackUrl="https://"+(req.get("x-forwarded-host")||req.get("host")||"")+"/api/signalwire/next-ivr";
  if(req.method!=="POST"||req.originalUrl!=="/api/signalwire/next-ivr"||
-   !checkSignalWireSignature(signingKey,signature,SIGNALWIRE_URL,form)){
+   !checkSignalWireSignature(signingKey,signature,callbackUrl,form)){
   res.status(403).type("text/plain").send("Invalid SignalWire callback signature");
   return;
  }
@@ -137,5 +141,5 @@ export async function signalWireNextHotline(req:Request,res:Response){
   return;
  }
  res.status(200).type("application/xml; charset=utf-8")
-  .set("Cache-Control","no-store").send(convertGavhahReplyToCxml(providerReply));
+  .set("Cache-Control","no-store").send(convertGavhahReplyToCxml(providerReply,callbackUrl));
 }

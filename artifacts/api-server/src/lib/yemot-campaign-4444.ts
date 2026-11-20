@@ -30,7 +30,7 @@ function tokenFromRow(row:Credential,key:Buffer):string {
 async function request(token:string,method:string,params:Record<string,string>):Promise<any>{
  const result=await fetch(API+method,{
   method:"POST",headers:{"Content-Type":"application/x-www-form-urlencoded","Accept":"application/json"},
-  body:new URLSearchParams({token,...params}),redirect:"error",cache:"no-store",
+  body:new URLSearchParams({token,...params}),redirect: "manual",cache:"no-store",
   signal:AbortSignal.timeout(15000)
  });
  if(!result.ok)throw Error("Yemot "+method+" HTTP failure");
